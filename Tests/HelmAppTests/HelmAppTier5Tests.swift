@@ -308,4 +308,41 @@ struct HelmAppTier5Tests {
         #expect(store.selectedProjectOpenExceptions.count == 1)
         store.stopPollingForTermination()
     }
+
+    @Test("HelmSemVer and AppUpdateManager parse GitHub releases and compare versions accurately")
+    @MainActor
+    func updateManagerParsesReleaseAndComparesSemVer() throws {
+        let v010 = try #require(HelmSemVer(parsing: "v0.1.0"))
+        let v011 = try #require(HelmSemVer(parsing: "0.1.1"))
+        let v020 = try #require(HelmSemVer(parsing: "v0.2.0-beta.1"))
+        let v100 = try #require(HelmSemVer(parsing: "1.0.0"))
+        #expect(v010 < v011)
+        #expect(v011 < v020)
+        #expect(v020 < v100)
+        #expect(HelmSemVer(parsing: "not-a-version") == nil)
+
+        let payload = """
+        {
+          "tag_name": "v0.2.0",
+          "name": "Helm v0.2.0",
+          "body": "Improved autonomous workflows.",
+          "html_url": "https://github.com/sushilk1991/helm/releases/tag/v0.2.0",
+          "assets": [
+            {
+              "name": "Helm-0.2.0-arm64.dmg",
+              "browser_download_url": "https://github.com/sushilk1991/helm/releases/download/v0.2.0/Helm-0.2.0-arm64.dmg"
+            },
+            {
+              "name": "Helm-0.2.0-arm64.dmg.sha256",
+              "browser_download_url": "https://github.com/sushilk1991/helm/releases/download/v0.2.0/Helm-0.2.0-arm64.dmg.sha256"
+            }
+          ]
+        }
+        """
+        let info = try AppUpdateManager.parseGitHubRelease(data: Data(payload.utf8))
+        #expect(info.version == HelmSemVer(major: 0, minor: 2, patch: 0))
+        #expect(info.dmgURL?.lastPathComponent == "Helm-0.2.0-arm64.dmg")
+        #expect(info.sha256URL?.lastPathComponent == "Helm-0.2.0-arm64.dmg.sha256")
+        #expect(info.notes == "Improved autonomous workflows.")
+    }
 }

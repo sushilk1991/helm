@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-VERSION="${HELM_VERSION:-0.1.0}"
+VERSION="${HELM_VERSION:-0.1.1}"
 ARCH="${HELM_ARCH:-arm64}"
 SIGN_IDENTITY="${HELM_SIGN_IDENTITY:--}"
 DERIVED_DATA="${ROOT}/.build/DerivedDataRelease"

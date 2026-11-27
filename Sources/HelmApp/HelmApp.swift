@@ -49,6 +49,11 @@ struct HelmSwiftUIApp: App {
                     store.reopenOnboarding()
                 }
                 .keyboardShortcut(",", modifiers: .command)
+
+                Button("Check for Updates…") {
+                    store.updateManager.showUpdatePopover = true
+                    Task { await store.updateManager.checkForUpdates(userInitiated: true) }
+                }
             }
 
             CommandMenu("Watch") {

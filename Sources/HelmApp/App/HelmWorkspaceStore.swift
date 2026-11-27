@@ -73,6 +73,7 @@ public final class HelmWorkspaceStore {
     public let sandboxExecutor: ExecutionRouter
     public let browserService: BrowseReadActTool
     public let notificationCoordinator: NotificationCoordinator
+    public let updateManager: AppUpdateManager
 
     public var selectedProjectID: UUID?
     public var selectedAgentID: UUID?
@@ -127,6 +128,7 @@ public final class HelmWorkspaceStore {
         sandboxExecutor: ExecutionRouter,
         browserService: BrowseReadActTool,
         notificationCoordinator: NotificationCoordinator,
+        updateManager: AppUpdateManager? = nil,
         forcedReduceMotion: Bool = false
     ) {
         self.controlPlane = controlPlane
@@ -134,6 +136,10 @@ public final class HelmWorkspaceStore {
         self.sandboxExecutor = sandboxExecutor
         self.browserService = browserService
         self.notificationCoordinator = notificationCoordinator
+        self.updateManager = updateManager ?? AppUpdateManager(
+            environment: ["HELM_DISABLE_UPDATE_CHECK": "1"],
+            arguments: ["--headless"]
+        )
         self.forcedReduceMotion = forcedReduceMotion
     }
 
@@ -153,6 +159,7 @@ public final class HelmWorkspaceStore {
             environment: environment
         )
         let notif = NotificationCoordinator(arguments: arguments, environment: environment)
+        let updater = AppUpdateManager(environment: environment, arguments: arguments)
         let reduceMotion = arguments.contains("--reduce-motion") || environment["HELM_REDUCE_MOTION"] == "1"
         let store = HelmWorkspaceStore(
             controlPlane: cp,
@@ -160,6 +167,7 @@ public final class HelmWorkspaceStore {
             sandboxExecutor: router,
             browserService: browser,
             notificationCoordinator: notif,
+            updateManager: updater,
             forcedReduceMotion: reduceMotion
         )
         let envStatus = LocalEnvironmentStatus.detect(environment: environment)
@@ -300,6 +308,7 @@ public final class HelmWorkspaceStore {
         }
         settleHelmCounter += 1
         ensurePollingState()
+        updateManager.startPeriodicChecks()
     }
 
     public func reloadAll() async {
@@ -459,6 +468,7 @@ public final class HelmWorkspaceStore {
 
     public func shutdownBackgroundWork() async {
         stopPollingForTermination()
+        updateManager.stopPeriodicChecks()
         let browserService = self.browserService
         let sandboxExecutor = self.sandboxExecutor
         await withTaskGroup(of: Void.self) { group in

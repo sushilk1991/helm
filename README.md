@@ -24,10 +24,10 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full v1 architecture 
 
 ## Download (macOS Apple Silicon)
 
-Download the **Developer ID signed & Apple-notarized** **`Helm-0.1.0-arm64.dmg`** installer from [GitHub Releases](https://github.com/sushilk1991/helm/releases/latest):
+Download the **Developer ID signed & Apple-notarized** **`Helm-0.1.1-arm64.dmg`** installer from [GitHub Releases](https://github.com/sushilk1991/helm/releases/latest):
 
-1. Open `Helm-0.1.0-arm64.dmg` and drag **Helm.app** into **Applications**.
-2. Launch **Helm** from Applications (macOS 15.0+ on Apple Silicon `arm64`).
+1. Open `Helm-0.1.1-arm64.dmg` and drag **Helm.app** into **Applications**.
+2. Launch **Helm** from Applications (macOS 15.0+ on Apple Silicon `arm64`). Built-in auto-update checks GitHub Releases automatically and lets you update in one click from the sidebar.
 
 To build (and optionally sign & notarize) the DMG locally from source:
 ```bash

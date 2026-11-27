@@ -9,20 +9,29 @@ public struct HarborInteractiveShellView: View {
     }
 
     public var body: some View {
-        NavigationSplitView {
-            ProjectSidebarView(store: store)
-                .navigationSplitViewColumnWidth(min: 220, ideal: 240, max: 260)
-        } detail: {
-            HStack(spacing: 0) {
-                ProjectCanvasView(store: store)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+        Group {
+            if store.showOnboarding {
+                OnboardingFlowView(store: store)
+                    .transition(.opacity.combined(with: .scale(scale: 0.985)))
+            } else {
+                NavigationSplitView {
+                    ProjectSidebarView(store: store)
+                        .navigationSplitViewColumnWidth(min: 224, ideal: 244, max: 272)
+                } detail: {
+                    HStack(spacing: 0) {
+                        ProjectCanvasView(store: store)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-                if store.isInspectorVisible {
-                    DetailInspectorView(store: store)
-                        .transition(.move(edge: .trailing).combined(with: .opacity))
+                        if store.isInspectorVisible && store.selectedProject != nil {
+                            DetailInspectorView(store: store)
+                                .transition(.move(edge: .trailing).combined(with: .opacity))
+                        }
+                    }
                 }
+                .transition(.opacity)
             }
         }
+        .animation(store.forcedReduceMotion ? HelmMotion.exit : HelmMotion.state, value: store.showOnboarding)
         .environment(\.helmReduceMotion, store.forcedReduceMotion)
         .environment(\.helmWindowOccluded, store.isWindowOccluded)
         .sheet(isPresented: $store.showNewProjectSheet) {
@@ -33,7 +42,7 @@ public struct HarborInteractiveShellView: View {
                 AddAgentSheet(store: store, projectID: project.id)
             }
         }
-        .frame(minWidth: 960, minHeight: 620)
+        .frame(minWidth: 980, minHeight: 640)
     }
 }
 
@@ -58,7 +67,7 @@ public struct HarborSnapshotShellView: View {
             ProjectCanvasView(store: store, horizonPingOverride: horizonPingOverride)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-            if store.isInspectorVisible {
+            if store.isInspectorVisible && store.selectedProject != nil {
                 DetailInspectorView(store: store)
             }
         }

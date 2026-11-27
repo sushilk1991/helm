@@ -44,6 +44,13 @@ struct HelmSwiftUIApp: App {
                 .keyboardShortcut("n", modifiers: .command)
             }
 
+            CommandGroup(replacing: .appSettings) {
+                Button("Setup & AI Provider…") {
+                    store.reopenOnboarding()
+                }
+                .keyboardShortcut(",", modifiers: .command)
+            }
+
             CommandMenu("Watch") {
                 Button("Start Watch") {
                     Task { await store.startSelectedProject() }
@@ -66,9 +73,45 @@ struct HelmSwiftUIApp: App {
                 .disabled(store.selectedProject == nil)
 
                 Button("Toggle Inspector") {
-                    store.isInspectorVisible.toggle()
+                    withAnimation(HelmMotion.state) {
+                        store.isInspectorVisible.toggle()
+                    }
                 }
                 .keyboardShortcut("i", modifiers: [.command, .option])
+                .disabled(store.selectedProject == nil)
+
+                Divider()
+
+                Menu("Developer Diagnostics") {
+                    Button("Simulate Stall") {
+                        Task { await store.simulateCondition(.stall) }
+                    }
+                    Button("Simulate Goal Drift") {
+                        Task { await store.simulateCondition(.drift) }
+                    }
+                    Button("Simulate Human Decision") {
+                        Task { await store.simulateCondition(.humanDecision) }
+                    }
+                    Button("Simulate Dependency Cycle") {
+                        Task { await store.simulateCondition(.cycle) }
+                    }
+                    Divider()
+                    Button("Verify Isolated Sandbox") {
+                        store.isInspectorVisible = true
+                        store.inspectorTab = .activity
+                        Task { await store.runQuickSandboxCheck(command: "pwd && uname -s && echo helm-sandbox-ok") }
+                    }
+                    Button("Verify Headless Browser + OCR") {
+                        store.isInspectorVisible = true
+                        store.inspectorTab = .activity
+                        Task {
+                            await store.runQuickBrowserCheck(
+                                url: "data:text/html,<html><body><h1>HELM%20BROWSER%20OK</h1></body></html>"
+                            )
+                        }
+                    }
+                }
+                .disabled(store.selectedProject == nil)
             }
         }
 

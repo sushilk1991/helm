@@ -9,26 +9,52 @@ public struct DetailInspectorView: View {
     }
 
     public var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: HelmSpace.xl) {
-                // 1. Selected Agent Header & Private Memory
-                if let agent = store.selectedAgent {
-                    selectedAgentSection(agent)
+        VStack(spacing: 0) {
+            // Clean inspector header with segmented tabs + close button
+            HStack(spacing: 8) {
+                Picker("", selection: $store.inspectorTab) {
+                    ForEach(InspectorTab.allCases) { tab in
+                        Text(tab.rawValue).tag(tab)
+                    }
                 }
+                .pickerStyle(.segmented)
+                .labelsHidden()
 
-                // 2. Sandbox / VM Execution Output Well
-                sandboxExecutionSection
-
-                // 3. Headless Browser + Native Vision OCR Preview
-                browserOCRSection
-
-                // 4. Run Events Audit Stream
-                runEventsSection
+                Button {
+                    withAnimation(HelmMotion.state) {
+                        store.isInspectorVisible = false
+                    }
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(HelmInk.muted)
+                        .frame(width: 24, height: 24)
+                        .background(HelmSurface.elevated, in: Circle())
+                }
+                .buttonStyle(.plain)
+                .help("Hide Inspector (⌥⌘I)")
             }
-            .padding(HelmSpace.xl)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 14)
+
+            Divider().overlay(HelmSurface.line)
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    switch store.inspectorTab {
+                    case .agent:
+                        agentTabContent
+                    case .activity:
+                        activityTabContent
+                    case .timeline:
+                        timelineTabContent
+                    }
+                }
+                .padding(16)
+            }
         }
         .frame(width: 320)
-        .background(HelmSurface.canvas)
+        .background(HelmSurface.sidebar)
         .overlay(alignment: .leading) {
             Rectangle()
                 .fill(HelmSurface.line)
@@ -36,350 +62,309 @@ public struct DetailInspectorView: View {
         }
     }
 
-    // MARK: - Selected Agent
+    // MARK: - Tab 1: Selected Agent Showcase
 
-    private func selectedAgentSection(_ agent: AgentProfile) -> some View {
-        VStack(alignment: .leading, spacing: HelmSpace.m) {
-            Text("Agent Inspector")
-                .font(.headline)
-                .foregroundStyle(HelmInk.primary)
+    @ViewBuilder
+    private var agentTabContent: some View {
+        if let agent = store.selectedAgent {
+            VStack(spacing: 14) {
+                // Hero living character stage
+                VStack(spacing: 12) {
+                    AgentCharacterCanvas(
+                        seed: agent.characterSeed,
+                        state: agent.activityState,
+                        size: 76,
+                        showStageBacking: true,
+                        interactive: true
+                    )
 
-            VStack(alignment: .leading, spacing: HelmSpace.l) {
-                HStack(spacing: HelmSpace.l) {
-                    AgentCharacterCanvas(seed: agent.characterSeed, state: agent.activityState, size: 36)
-
-                    VStack(alignment: .leading, spacing: HelmSpace.xxs) {
+                    VStack(spacing: 4) {
                         Text(agent.name)
-                            .font(.body.weight(.semibold))
+                            .font(.title3.weight(.bold))
                             .foregroundStyle(HelmInk.primary)
-                            .lineLimit(1)
                         Text("\(agent.role.displayName) · \(agent.backend.displayName)")
                             .font(.caption)
                             .foregroundStyle(HelmInk.secondary)
                     }
-                    Spacer(minLength: 0)
+
+                    AgentStatusBadge(state: agent.activityState)
                 }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 18)
+                .padding(.horizontal, 14)
+                .helmCard(cornerRadius: HelmRadius.card)
 
-                Text(agent.goal)
-                    .font(.callout)
-                    .foregroundStyle(HelmInk.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                // Capabilities
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 90), spacing: HelmSpace.xs)], alignment: .leading, spacing: HelmSpace.xs) {
-                    ForEach(Array(agent.capabilities).sorted(by: { $0.rawValue < $1.rawValue }), id: \.rawValue) { cap in
-                        MetadataTag(cap.displayName)
-                    }
-                }
-
-                // Private Memory Entries
-                if !store.selectedAgentPrivateMemory.isEmpty {
-                    Divider().overlay(HelmSurface.line)
-                    Text("Private Memory")
+                // Mission & Capabilities
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Mission")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(HelmInk.secondary)
 
-                    ForEach(store.selectedAgentPrivateMemory.prefix(4)) { mem in
-                        VStack(alignment: .leading, spacing: HelmSpace.xxs) {
-                            Text(mem.key)
-                                .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                                .foregroundStyle(HelmInk.primary)
-                            Text(mem.content)
-                                .font(.caption)
-                                .foregroundStyle(HelmInk.secondary)
-                                .lineLimit(2)
+                    Text(agent.goal)
+                        .font(.callout)
+                        .foregroundStyle(HelmInk.primary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    Divider().overlay(HelmSurface.line)
+
+                    Text("Permissions")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(HelmInk.secondary)
+
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 95), spacing: 6)], alignment: .leading, spacing: 6) {
+                        ForEach(Array(agent.capabilities).sorted(by: { $0.rawValue < $1.rawValue }), id: \.rawValue) { cap in
+                            MetadataTag(cap.displayName)
                         }
                     }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(14)
+                .helmCard(cornerRadius: HelmRadius.panel)
+
+                // Private Memory
+                if !store.selectedAgentPrivateMemory.isEmpty {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Private Notes")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(HelmInk.secondary)
+
+                        ForEach(store.selectedAgentPrivateMemory.prefix(5)) { mem in
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(mem.title.isEmpty ? mem.key : mem.title)
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(HelmInk.primary)
+                                Text(mem.content)
+                                    .font(.caption)
+                                    .foregroundStyle(HelmInk.secondary)
+                                    .lineLimit(3)
+                            }
+                            .padding(.vertical, 2)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(14)
+                    .helmCard(cornerRadius: HelmRadius.panel)
+                }
             }
-            .padding(HelmSpace.l)
-            .background(HelmSurface.elevated, in: RoundedRectangle(cornerRadius: HelmRadius.panel, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: HelmRadius.panel, style: .continuous)
-                    .strokeBorder(HelmSurface.line, lineWidth: 1.0)
-            )
+        } else {
+            VStack(spacing: 10) {
+                Text("Select an agent")
+                    .font(.callout.weight(.semibold))
+                    .foregroundStyle(HelmInk.primary)
+                Text("Click any bot card on the workspace stage to inspect its mission, permissions, and private notes.")
+                    .font(.caption)
+                    .foregroundStyle(HelmInk.secondary)
+                    .multilineTextAlignment(.center)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(24)
         }
     }
 
-    // MARK: - Sandbox / VM Output Well
+    // MARK: - Tab 2: Live Sandbox & Headless Browser Output (Zero Debug Buttons)
 
-    private var sandboxExecutionSection: some View {
+    private var activityTabContent: some View {
         let exec = store.selectedLatestExecutionResult
-        let taskOutputs = Array(
-            store.selectedProjectTasks
-                .filter {
-                    ($0.resultSummary?.isEmpty == false)
-                        || ($0.errorSummary?.isEmpty == false)
-                        || !$0.artifactPaths.isEmpty
-                }
-                .suffix(3)
-                .reversed()
-        )
-        let artifacts = Array(store.selectedProjectArtifacts.suffix(4).reversed())
+        let obs = store.selectedLatestBrowserObservation
+        let artifacts = Array(store.selectedProjectArtifacts.suffix(5).reversed())
 
-        return VStack(alignment: .leading, spacing: HelmSpace.s) {
-            HStack {
-                Text("Isolated Sandbox")
-                    .font(.headline)
-                    .foregroundStyle(HelmInk.primary)
-                Spacer()
-                MetadataTag(
-                    exec?.modeUsed == .virtualizationVM ? "VZ Micro-VM" : (exec != nil ? "Seatbelt" : (store.virtualizationAvailable ? "VZ Ready" : "Seatbelt"))
+        return VStack(alignment: .leading, spacing: 16) {
+            // Isolated Execution
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Label("Sandbox Output", systemImage: "terminal")
+                        .font(.callout.weight(.semibold))
+                        .foregroundStyle(HelmInk.primary)
+                    Spacer()
+                    MetadataTag(
+                        exec?.modeUsed == .virtualizationVM ? "Apple VM" : (store.virtualizationAvailable ? "VM Ready" : "Sandbox")
+                    )
+                }
+
+                VStack(alignment: .leading, spacing: 8) {
+                    if let exec {
+                        HStack(spacing: 8) {
+                            Text(exec.exitCode == 0 ? "Succeeded" : "Exit \(exec.exitCode)")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(exec.exitCode == 0 ? HelmSemantic.steady : HelmSemantic.critical)
+                            Spacer()
+                            Text(String(format: "%.0f ms", exec.durationMs))
+                                .font(.system(size: 11, design: .monospaced))
+                                .monospacedDigit()
+                                .foregroundStyle(HelmInk.muted)
+                        }
+                        Text(exec.stdout.isEmpty ? (exec.stderr.isEmpty ? "(no output)" : exec.stderr) : exec.stdout)
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(HelmInk.primary)
+                            .lineSpacing(2)
+                            .lineLimit(10)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    } else {
+                        Text("No code has run in this project yet. Sandbox output streams here automatically when a coder agent executes.")
+                            .font(.caption)
+                            .foregroundStyle(HelmInk.muted)
+                    }
+                }
+                .padding(12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(HelmSurface.well, in: RoundedRectangle(cornerRadius: HelmRadius.panel, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: HelmRadius.panel, style: .continuous)
+                        .strokeBorder(HelmSurface.line, lineWidth: 1)
                 )
             }
 
-            VStack(alignment: .leading, spacing: HelmSpace.m) {
-                if let exec {
-                    HStack(spacing: HelmSpace.m) {
-                        Text("exit \(exec.exitCode)")
-                            .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                            .monospacedDigit()
-                            .foregroundStyle(exec.exitCode == 0 ? HelmSemantic.steady : HelmSemantic.critical)
-                        Text(String(format: "%.0f ms", exec.durationMs))
-                            .font(.system(size: 11, design: .monospaced))
-                            .monospacedDigit()
-                            .foregroundStyle(HelmInk.muted)
-                        Spacer()
-                    }
-                    Text(exec.stdout.isEmpty ? (exec.stderr.isEmpty ? "(no output)" : exec.stderr) : exec.stdout)
-                        .font(.system(size: 11, design: .monospaced))
+            // Headless Browser + Vision OCR
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Label("Browser & Vision OCR", systemImage: "globe")
+                        .font(.callout.weight(.semibold))
                         .foregroundStyle(HelmInk.primary)
-                        .lineSpacing(2)
-                        .lineLimit(8)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                } else if !taskOutputs.isEmpty || !artifacts.isEmpty {
-                    ForEach(taskOutputs) { task in
-                        VStack(alignment: .leading, spacing: HelmSpace.xxs) {
-                            Text(task.title)
-                                .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                                .foregroundStyle(HelmInk.primary)
-                                .lineLimit(1)
-                            if let summary = task.errorSummary ?? task.resultSummary, !summary.isEmpty {
-                                Text(summary)
-                                    .font(.system(size: 11, design: .monospaced))
-                                    .foregroundStyle(task.errorSummary != nil ? HelmSemantic.critical : HelmInk.secondary)
-                                    .lineLimit(3)
-                            }
-                            if !task.artifactPaths.isEmpty {
-                                Text(task.artifactPaths.joined(separator: ", "))
-                                    .font(.system(size: 10, design: .monospaced))
-                                    .foregroundStyle(HelmInk.muted)
-                                    .lineLimit(2)
-                            }
-                        }
+                    Spacer()
+                    if let obs {
+                        TrustLevelBadge(trustLevel: obs.trustTag)
                     }
-
-                    if !artifacts.isEmpty {
-                        if !taskOutputs.isEmpty {
-                            Divider().overlay(HelmSurface.line)
-                        }
-                        ForEach(artifacts) { artifact in
-                            HStack(spacing: HelmSpace.s) {
-                                Text(artifact.relativePath)
-                                    .font(.system(size: 11, design: .monospaced))
-                                    .foregroundStyle(HelmInk.primary)
-                                    .lineLimit(1)
-                                Spacer()
-                                Text("\(artifact.kind) · \(artifact.byteSize) B")
-                                    .font(.system(size: 10, design: .monospaced))
-                                    .monospacedDigit()
-                                    .foregroundStyle(HelmInk.muted)
-                            }
-                        }
-                    }
-                } else {
-                    Text("Awaiting isolated code execution. Headless commands stream stdout/stderr here without touching host focus.")
-                        .font(.system(size: 11, design: .monospaced))
-                        .foregroundStyle(HelmInk.secondary)
-                        .lineSpacing(2)
                 }
-            }
-            .padding(HelmSpace.l)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(HelmSurface.well, in: RoundedRectangle(cornerRadius: HelmRadius.panel, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: HelmRadius.panel, style: .continuous)
-                    .strokeBorder(HelmSurface.line, lineWidth: 1.0)
-            )
 
-            Button("Run Sandbox Check") {
-                Task {
-                    await store.runQuickSandboxCheck(command: "pwd && echo helm-sandbox-ok")
-                }
-            }
-            .buttonStyle(HelmSecondaryButtonStyle())
-            .disabled(store.isRunningDiagnostic || store.selectedProject == nil)
-        }
-    }
-
-    // MARK: - Browser + Native Vision OCR Preview
-
-    private var browserOCRSection: some View {
-        let obs = store.selectedLatestBrowserObservation
-        let webObservations = Array(
-            store.selectedProjectSharedState
-                .filter { $0.category == .observation }
-                .suffix(3)
-                .reversed()
-        )
-        let browserArtifacts = Array(
-            store.selectedProjectArtifacts
-                .filter {
-                    let lowerKind = $0.kind.lowercased()
-                    let lowerPath = $0.relativePath.lowercased()
-                    return lowerKind.contains("browser") || lowerKind.contains("ocr") || lowerKind.contains("screenshot") || lowerPath.hasSuffix(".png")
-                }
-                .suffix(3)
-                .reversed()
-        )
-
-        return VStack(alignment: .leading, spacing: HelmSpace.s) {
-            HStack {
-                Text("Headless Browser & OCR")
-                    .font(.headline)
-                    .foregroundStyle(HelmInk.primary)
-                Spacer()
-                if let obs {
-                    TrustLevelBadge(trustLevel: obs.trustTag)
-                } else if !webObservations.isEmpty {
-                    TrustLevelBadge(trustLevel: webObservations[0].trustLevel)
-                }
-            }
-
-            VStack(alignment: .leading, spacing: HelmSpace.m) {
-                if let obs {
-                    HStack(spacing: HelmSpace.s) {
-                        Text(obs.url)
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundStyle(HelmInk.primary)
-                            .lineLimit(1)
-                        Spacer()
-                        Text(String(format: "%.0f ms", obs.latencyMs))
-                            .font(.system(size: 11, design: .monospaced))
-                            .monospacedDigit()
-                            .foregroundStyle(HelmInk.muted)
-                    }
-
-                    if obs.ocrLines.isEmpty {
-                        Text("No OCR text recognized in viewport.")
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundStyle(HelmInk.muted)
-                    } else {
-                        ForEach(Array(obs.ocrLines.prefix(5).enumerated()), id: \.offset) { _, line in
-                            HStack(spacing: HelmSpace.s) {
-                                Text(line.text)
-                                    .font(.system(size: 11, design: .monospaced))
-                                    .foregroundStyle(HelmInk.primary)
-                                    .lineLimit(1)
-                                Spacer()
-                                Text(String(format: "%.0f%%", line.confidence * 100))
-                                    .font(.system(size: 10, design: .monospaced))
-                                    .monospacedDigit()
-                                    .foregroundStyle(HelmInk.muted)
-                            }
-                        }
-                    }
-                } else if !webObservations.isEmpty || !browserArtifacts.isEmpty {
-                    ForEach(webObservations, id: \.id) { item in
-                        VStack(alignment: .leading, spacing: HelmSpace.xxs) {
-                            Text(item.key)
-                                .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                                .foregroundStyle(HelmInk.primary)
-                                .lineLimit(1)
-                            Text(item.content)
-                                .font(.system(size: 11, design: .monospaced))
-                                .foregroundStyle(HelmInk.secondary)
-                                .lineLimit(3)
-                        }
-                    }
-                    ForEach(browserArtifacts) { artifact in
-                        HStack(spacing: HelmSpace.s) {
-                            Text(artifact.relativePath)
+                VStack(alignment: .leading, spacing: 8) {
+                    if let obs {
+                        HStack(spacing: 6) {
+                            Text(obs.url)
                                 .font(.system(size: 11, design: .monospaced))
                                 .foregroundStyle(HelmInk.primary)
                                 .lineLimit(1)
                             Spacer()
-                            Text(artifact.kind)
+                            Text(String(format: "%.0f ms", obs.latencyMs))
                                 .font(.system(size: 10, design: .monospaced))
+                                .monospacedDigit()
                                 .foregroundStyle(HelmInk.muted)
                         }
-                    }
-                } else {
-                    Text("No active browser frame captured. Vision OCR lines and DOM element refs appear here.")
-                        .font(.system(size: 11, design: .monospaced))
-                        .foregroundStyle(HelmInk.secondary)
-                        .lineSpacing(2)
-                }
-            }
-            .padding(HelmSpace.l)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(HelmSurface.well, in: RoundedRectangle(cornerRadius: HelmRadius.panel, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: HelmRadius.panel, style: .continuous)
-                    .strokeBorder(HelmSurface.line, lineWidth: 1.0)
-            )
 
-            Button("Run Browser Check") {
-                Task {
-                    await store.runQuickBrowserCheck(
-                        url: "data:text/html,<html><body><h1>HELM%20BROWSER%20OK</h1></body></html>"
-                    )
+                        if obs.ocrLines.isEmpty {
+                            Text("No readable text detected in viewport.")
+                                .font(.caption)
+                                .foregroundStyle(HelmInk.muted)
+                        } else {
+                            ForEach(Array(obs.ocrLines.prefix(5).enumerated()), id: \.offset) { _, line in
+                                HStack(spacing: 6) {
+                                    Text(line.text)
+                                        .font(.system(size: 11, design: .monospaced))
+                                        .foregroundStyle(HelmInk.primary)
+                                        .lineLimit(1)
+                                    Spacer()
+                                    Text(String(format: "%.0f%%", line.confidence * 100))
+                                        .font(.system(size: 10, design: .monospaced))
+                                        .monospacedDigit()
+                                        .foregroundStyle(HelmInk.muted)
+                                }
+                            }
+                        }
+                    } else {
+                        Text("No web pages visited yet. Live Vision OCR reads appear here automatically when a browser agent navigates.")
+                            .font(.caption)
+                            .foregroundStyle(HelmInk.muted)
+                    }
+                }
+                .padding(12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(HelmSurface.well, in: RoundedRectangle(cornerRadius: HelmRadius.panel, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: HelmRadius.panel, style: .continuous)
+                        .strokeBorder(HelmSurface.line, lineWidth: 1)
+                )
+            }
+
+            if !artifacts.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    Label("Captured Artifacts", systemImage: "doc.on.doc")
+                        .font(.callout.weight(.semibold))
+                        .foregroundStyle(HelmInk.primary)
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(artifacts) { art in
+                            HStack(spacing: 6) {
+                                Text(art.relativePath)
+                                    .font(.system(size: 11, design: .monospaced))
+                                    .foregroundStyle(HelmInk.primary)
+                                    .lineLimit(1)
+                                Spacer()
+                                Text("\(art.byteSize) B")
+                                    .font(.system(size: 10, design: .monospaced))
+                                    .foregroundStyle(HelmInk.muted)
+                            }
+                        }
+                    }
+                    .padding(12)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .helmCard(cornerRadius: HelmRadius.panel)
                 }
             }
-            .buttonStyle(HelmSecondaryButtonStyle())
-            .disabled(store.isRunningDiagnostic || store.selectedProject == nil)
         }
     }
 
-    // MARK: - Run Events Audit Stream
+    // MARK: - Tab 3: Human-Readable Timeline
 
-    private var runEventsSection: some View {
-        let events = Array(store.selectedProjectEvents.suffix(12).reversed())
+    private var timelineTabContent: some View {
+        let events = Array(store.selectedProjectEvents.suffix(20).reversed())
 
-        return VStack(alignment: .leading, spacing: HelmSpace.s) {
-            HStack {
-                Text("Run Audit Stream")
-                    .font(.headline)
-                    .foregroundStyle(HelmInk.primary)
-                Spacer()
-                Text("\(store.selectedProjectEvents.count)")
-                    .font(.caption.weight(.semibold))
-                    .monospacedDigit()
-                    .foregroundStyle(HelmInk.secondary)
-            }
-
-            VStack(alignment: .leading, spacing: HelmSpace.s) {
-                if events.isEmpty {
-                    Text("No events recorded yet.")
-                        .font(.system(size: 11, design: .monospaced))
-                        .foregroundStyle(HelmInk.muted)
-                } else {
-                    ForEach(events) { event in
-                        VStack(alignment: .leading, spacing: 2) {
-                            HStack(spacing: HelmSpace.s) {
-                                Text(event.createdAt, format: .dateTime.hour().minute().second())
-                                    .font(.system(size: 10, design: .monospaced))
-                                    .monospacedDigit()
-                                    .foregroundStyle(HelmInk.muted)
-                                Text(event.kind.rawValue)
-                                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                                    .foregroundStyle(eventColor(event.kind))
-                            }
-                            Text(event.summary)
-                                .font(.system(size: 11, design: .monospaced))
-                                .foregroundStyle(HelmInk.secondary)
-                                .lineLimit(2)
+        return VStack(alignment: .leading, spacing: 10) {
+            if events.isEmpty {
+                Text("No activity recorded yet. Start the watch to see milestones and task completions here.")
+                    .font(.caption)
+                    .foregroundStyle(HelmInk.muted)
+                    .padding(16)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .helmCard(cornerRadius: HelmRadius.panel)
+            } else {
+                ForEach(events) { event in
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack(spacing: 6) {
+                            Circle()
+                                .fill(eventColor(event.kind))
+                                .frame(width: 6, height: 6)
+                            Text(friendlyEventLabel(event.kind))
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(eventColor(event.kind))
+                            Spacer()
+                            Text(event.createdAt, format: .dateTime.hour().minute().second())
+                                .font(.system(size: 10, design: .monospaced))
+                                .monospacedDigit()
+                                .foregroundStyle(HelmInk.muted)
                         }
+                        Text(event.summary.replacingOccurrences(of: "STEADY_OK: ", with: ""))
+                            .font(.caption)
+                            .foregroundStyle(HelmInk.secondary)
+                            .lineLimit(3)
                     }
+                    .padding(12)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .helmCard(cornerRadius: HelmRadius.panel)
                 }
             }
-            .padding(HelmSpace.l)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(HelmSurface.well, in: RoundedRectangle(cornerRadius: HelmRadius.panel, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: HelmRadius.panel, style: .continuous)
-                    .strokeBorder(HelmSurface.line, lineWidth: 1.0)
-            )
+        }
+    }
+
+    private func friendlyEventLabel(_ kind: RunEventKind) -> String {
+        switch kind {
+        case .projectCreated: return "Project Created"
+        case .projectStarted: return "Watch Started"
+        case .projectPaused: return "Watch Paused"
+        case .projectHeld: return "Needs Decision"
+        case .projectCompleted: return "Project Completed"
+        case .agentAdded: return "Agent Joined"
+        case .agentStateChanged: return "Status Update"
+        case .taskCreated: return "Task Created"
+        case .taskDelegated: return "Task Delegated"
+        case .taskCompleted: return "Task Completed"
+        case .taskSelfCorrected: return "Self-Corrected"
+        case .taskFailed: return "Task Failed"
+        case .toolExecuted: return "Tool Run"
+        case .sharedStateWritten: return "Memory Updated"
+        case .sharedStateRejected: return "Memory Guard"
+        case .heartbeatSteadyOK: return "Quiet Check-In"
+        case .exceptionRaised: return "Exception Surfaced"
+        case .exceptionResolved: return "Exception Resolved"
+        case .recoveryReconciled: return "Recovered"
         }
     }
 

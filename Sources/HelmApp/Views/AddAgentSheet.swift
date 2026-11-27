@@ -80,6 +80,7 @@ public struct AddAgentSheet: View {
     @State private var lastAutoGoal: String = ""
     @State private var backend: LLMBackendKind = .claudeCLI
     @State private var capabilities: Set<AgentCapability> = [.readSharedState, .proposeSharedState, .requestHumanDecision]
+    @State private var previewSeed: AgentCharacterSeed = AgentCharacterSeed(agentID: UUID(), isOrchestrator: false)
     @State private var validationError: String?
     @State private var isSubmitting: Bool = false
 
@@ -90,23 +91,58 @@ public struct AddAgentSheet: View {
         self.projectID = projectID
     }
 
-    public var body: some View {
-        VStack(alignment: .leading, spacing: HelmSpace.xl) {
-            VStack(alignment: .leading, spacing: HelmSpace.xs) {
-                Text("Deploy Specialized Agent")
-                    .font(.title2.weight(.semibold))
-                    .foregroundStyle(HelmInk.primary)
-                Text("Assign a distinct role, goal, backend provider, and sandbox permissions.")
-                    .font(.callout)
-                    .foregroundStyle(HelmInk.secondary)
-            }
+    private var previewState: AgentActivityState {
+        switch role {
+        case .coder: return .executing
+        case .browserAnalyst: return .browsing
+        case .qaVerifier: return .completed
+        case .researcher: return .thinking
+        default: return .idle
+        }
+    }
 
-            VStack(alignment: .leading, spacing: HelmSpace.l) {
-                HStack(spacing: HelmSpace.l) {
-                    VStack(alignment: .leading, spacing: HelmSpace.xs) {
-                        Text("Role Preset")
-                            .font(.callout.weight(.medium))
-                            .foregroundStyle(HelmInk.primary)
+    public var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            // Hero Live Bot Character Preview
+            HStack(spacing: 16) {
+                AgentCharacterCanvas(
+                    seed: previewSeed,
+                    state: previewState,
+                    size: 68,
+                    showStageBacking: true,
+                    interactive: true
+                )
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Deploy Specialized Agent")
+                        .font(.title3.weight(.bold))
+                        .foregroundStyle(HelmInk.primary)
+                    Text("Every agent gets a unique animated dot-matrix character derived from its identity.")
+                        .font(.caption)
+                        .foregroundStyle(HelmInk.secondary)
+                    Button {
+                        withAnimation(HelmMotion.bouncy) {
+                            previewSeed = AgentCharacterSeed(agentID: UUID(), isOrchestrator: false)
+                        }
+                    } label: {
+                        Label("Preview another bot", systemImage: "dice")
+                            .font(.caption.weight(.medium))
+                    }
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(HelmAccent.primary)
+                    .padding(.top, 2)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(14)
+            .helmCard(cornerRadius: HelmRadius.card)
+
+            VStack(alignment: .leading, spacing: 14) {
+                HStack(spacing: 14) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Role")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(HelmInk.secondary)
                         Picker("Role", selection: $role) {
                             ForEach(selectableRoles, id: \.self) { r in
                                 Text(r.displayName).tag(r)
@@ -118,10 +154,10 @@ public struct AddAgentSheet: View {
                         }
                     }
 
-                    VStack(alignment: .leading, spacing: HelmSpace.xs) {
-                        Text("LLM Backend")
-                            .font(.callout.weight(.medium))
-                            .foregroundStyle(HelmInk.primary)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("AI Provider")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(HelmInk.secondary)
                         Picker("Backend", selection: $backend) {
                             ForEach(LLMBackendKind.allCases, id: \.self) { kind in
                                 Text(kind.displayName).tag(kind)
@@ -131,28 +167,28 @@ public struct AddAgentSheet: View {
                     }
                 }
 
-                VStack(alignment: .leading, spacing: HelmSpace.xs) {
+                VStack(alignment: .leading, spacing: 4) {
                     Text("Agent Name")
-                        .font(.callout.weight(.medium))
-                        .foregroundStyle(HelmInk.primary)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(HelmInk.secondary)
                     TextField("e.g., Chart Researcher", text: $name)
                         .textFieldStyle(.roundedBorder)
                 }
 
-                VStack(alignment: .leading, spacing: HelmSpace.xs) {
-                    Text("Goal")
-                        .font(.callout.weight(.medium))
-                        .foregroundStyle(HelmInk.primary)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Responsibility")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(HelmInk.secondary)
                     TextField("Describe this agent's specific responsibility…", text: $goal, axis: .vertical)
                         .lineLimit(2...4)
                         .textFieldStyle(.roundedBorder)
                 }
 
-                VStack(alignment: .leading, spacing: HelmSpace.s) {
+                VStack(alignment: .leading, spacing: 6) {
                     Text("Capabilities")
-                        .font(.callout.weight(.medium))
-                        .foregroundStyle(HelmInk.primary)
-                    LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], alignment: .leading, spacing: HelmSpace.s) {
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(HelmInk.secondary)
+                    LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], alignment: .leading, spacing: 6) {
                         ForEach(AgentCapability.allCases, id: \.self) { cap in
                             Toggle(cap.displayName, isOn: Binding(
                                 get: { capabilities.contains(cap) },
@@ -165,6 +201,7 @@ public struct AddAgentSheet: View {
                                 }
                             ))
                             .toggleStyle(.checkbox)
+                            .font(.callout)
                         }
                     }
                 }
@@ -181,20 +218,22 @@ public struct AddAgentSheet: View {
                 Button("Cancel") {
                     dismiss()
                 }
+                .buttonStyle(HelmSecondaryButtonStyle())
                 .keyboardShortcut(.cancelAction)
 
                 Button("Deploy Agent") {
                     submit()
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(HelmAccent.primary)
+                .buttonStyle(HelmPrimaryButtonStyle())
                 .disabled(isSubmitting)
                 .keyboardShortcut(.defaultAction)
             }
         }
-        .padding(HelmSpace.xxl)
-        .frame(width: 500)
+        .padding(22)
+        .frame(width: 520)
+        .background(HelmSurface.canvas)
         .onAppear {
+            backend = store.defaultBackend
             applyPreset(for: role)
         }
     }

@@ -9,6 +9,7 @@ public struct ProjectCanvasView: View {
     @Environment(\.helmReduceMotion) private var forcedReduceMotion
 
     @State private var pulseOpacity: Double = 0
+    @State private var hoveredAgentID: UUID?
 
     public init(store: HelmWorkspaceStore, horizonPingOverride: Bool = false) {
         self.store = store
@@ -23,7 +24,7 @@ public struct ProjectCanvasView: View {
         Group {
             if let project = store.selectedProject {
                 ScrollView {
-                    VStack(alignment: .leading, spacing: HelmSpace.l) {
+                    VStack(alignment: .leading, spacing: 22) {
                         headerStrip(project: project)
 
                         if let err = store.bannerErrorMessage {
@@ -56,8 +57,9 @@ public struct ProjectCanvasView: View {
                                             }
                                         },
                                         onInspectAgent: { agentID in
-                                            store.selectedAgentID = agentID
-                                            store.isInspectorVisible = true
+                                            withAnimation(effectiveReduceMotion ? HelmMotion.exit : HelmMotion.state) {
+                                                store.inspectAgent(agentID)
+                                            }
                                         }
                                     )
                                 }
@@ -72,11 +74,11 @@ public struct ProjectCanvasView: View {
                             )
                         }
 
-                        // Specialized Agent Roster
-                        agentRosterSection
+                        // Living Crew Stage (Prominent Animated Bot Cards)
+                        crewStageSection
 
-                        // Delegated Task DAG & Shared State Board
-                        HStack(alignment: .top, spacing: HelmSpace.xl) {
+                        // Work & Shared Memory Columns
+                        HStack(alignment: .top, spacing: 18) {
                             delegatedTasksColumn
                                 .frame(maxWidth: .infinity, alignment: .leading)
 
@@ -84,7 +86,7 @@ public struct ProjectCanvasView: View {
                                 .frame(maxWidth: .infinity, alignment: .leading)
                         }
                     }
-                    .padding(HelmSpace.xxl)
+                    .padding(24)
                 }
                 .background(HelmSurface.canvas)
                 .animation(effectiveReduceMotion ? HelmMotion.exit : HelmMotion.state, value: store.selectedProjectOpenExceptions.count)
@@ -94,29 +96,29 @@ public struct ProjectCanvasView: View {
         }
     }
 
-    // MARK: - Project & Orchestrator Header Strip
+    // MARK: - Calm Project Header
 
     private func headerStrip(project: Project) -> some View {
         let pingCount = store.horizonPingCounterByProject[project.id] ?? 0
         let openCount = store.selectedProjectOpenExceptions.count
 
-        return VStack(alignment: .leading, spacing: HelmSpace.l) {
-            HStack(alignment: .top, spacing: HelmSpace.l) {
+        return VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .center, spacing: 14) {
                 CompassHelmLogo(
-                    size: 36,
-                    style: .inlineMark,
+                    size: 38,
+                    style: .emblem,
                     hasOpenException: openCount > 0,
                     settleTrigger: store.settleHelmCounter
                 )
 
-                VStack(alignment: .leading, spacing: HelmSpace.xs) {
+                VStack(alignment: .leading, spacing: 3) {
                     Text(project.name)
-                        .font(.title2.weight(.semibold))
+                        .font(.system(size: 20, weight: .bold, design: .rounded))
                         .foregroundStyle(HelmInk.primary)
                         .lineLimit(1)
 
                     Text(project.goal)
-                        .font(.body)
+                        .font(.callout)
                         .foregroundStyle(HelmInk.secondary)
                         .lineLimit(2)
                         .help(project.goal)
@@ -124,20 +126,21 @@ public struct ProjectCanvasView: View {
 
                 Spacer(minLength: HelmSpace.l)
 
-                // <= 4 primary/secondary controls per cognitive load rubric
-                HStack(spacing: HelmSpace.m) {
+                HStack(spacing: 8) {
                     if project.status == .running {
                         Button {
                             Task { await store.pauseSelectedProject() }
                         } label: {
                             Label("Pause", systemImage: "pause.fill")
+                                .fixedSize(horizontal: true, vertical: false)
                         }
                         .buttonStyle(HelmSecondaryButtonStyle())
                     } else {
                         Button {
                             Task { await store.startSelectedProject() }
                         } label: {
-                            Label("Start", systemImage: "play.fill")
+                            Label("Start Watch", systemImage: "play.fill")
+                                .fixedSize(horizontal: true, vertical: false)
                         }
                         .buttonStyle(HelmPrimaryButtonStyle())
                         .disabled(project.status == .held)
@@ -146,187 +149,257 @@ public struct ProjectCanvasView: View {
                     Button {
                         store.showAddAgentSheet = true
                     } label: {
-                        Label("Agent", systemImage: "plus")
+                        Label("Add Agent", systemImage: "plus")
+                            .fixedSize(horizontal: true, vertical: false)
                     }
                     .buttonStyle(HelmSecondaryButtonStyle())
-                    .help("Deploy Specialized Agent")
-
-                    Menu {
-                        Button("Simulate Stall") {
-                            Task { await store.simulateCondition(.stall) }
-                        }
-                        Button("Simulate Goal Drift") {
-                            Task { await store.simulateCondition(.drift) }
-                        }
-                        Button("Simulate Human Decision") {
-                            Task { await store.simulateCondition(.humanDecision) }
-                        }
-                        Button("Simulate Dependency Cycle") {
-                            Task { await store.simulateCondition(.cycle) }
-                        }
-                    } label: {
-                        Image(systemName: "ellipsis.circle")
-                    }
-                    .menuStyle(.borderlessButton)
-                    .fixedSize()
-                    .help("Simulate Exception Conditions")
 
                     Button {
                         withAnimation(effectiveReduceMotion ? HelmMotion.exit : HelmMotion.state) {
                             store.isInspectorVisible.toggle()
                         }
                     } label: {
-                        Image(systemName: "sidebar.right")
+                        Image(systemName: store.isInspectorVisible ? "sidebar.right" : "sidebar.trailing")
+                            .foregroundStyle(store.isInspectorVisible ? HelmAccent.primary : HelmInk.secondary)
                     }
                     .buttonStyle(HelmSecondaryButtonStyle())
-                    .help("Toggle Inspector (⌥⌘I)")
+                    .help("Toggle Agent Inspector (⌥⌘I)")
                 }
             }
 
-            // Calm Watch Horizon Strip — silent steady pulse without noisy alert banners
-            VStack(alignment: .leading, spacing: HelmSpace.xs) {
+            // Quiet Watch Horizon Bar
+            VStack(alignment: .leading, spacing: 8) {
                 GeometryReader { geo in
                     ZStack(alignment: .leading) {
                         Capsule()
                             .fill(HelmSurface.line)
-                            .frame(height: 2)
+                            .frame(height: 2.5)
 
                         if openCount == 0 && (project.status == .running || project.status == .completed || horizonPingOverride) {
                             Capsule()
-                                .fill(HelmSemantic.steady.opacity(horizonPingOverride ? 0.55 : pulseOpacity))
-                                .frame(width: min(geo.size.width * 0.28, 180), height: 2)
+                                .fill(
+                                    LinearGradient(
+                                        colors: [HelmSemantic.steady.opacity(0.2), HelmSemantic.steady, HelmSemantic.steady.opacity(0.2)],
+                                        startPoint: .leading,
+                                        endPoint: .trailing
+                                    )
+                                )
+                                .opacity(horizonPingOverride ? 0.75 : max(0.35, pulseOpacity))
+                                .frame(width: min(geo.size.width * 0.34, 240), height: 2.5)
+                        } else if openCount > 0 {
+                            Capsule()
+                                .fill(HelmSemantic.attention)
+                                .frame(width: geo.size.width, height: 2.5)
                         }
                     }
                 }
-                .frame(height: 2)
+                .frame(height: 2.5)
 
-                HStack(spacing: HelmSpace.m) {
+                HStack(spacing: 10) {
                     ProjectStatusBadge(status: project.status)
 
-                    Text(openCount == 0 ? "Orchestrator Watch: Quiet (STEADY_OK)" : "Orchestrator Watch: Paused on Exception")
+                    Text(calmStatusSummary(for: project, openCount: openCount))
                         .font(.caption)
                         .foregroundStyle(openCount == 0 ? HelmInk.secondary : HelmSemantic.attention)
+
+                    Spacer(minLength: 0)
+
+                    HStack(spacing: 6) {
+                        Image(systemName: "folder")
+                            .font(.system(size: 10))
+                            .foregroundStyle(HelmInk.muted)
+                        Text(project.workspaceRoot.lastPathComponent)
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(HelmInk.muted)
+                            .lineLimit(1)
+                    }
 
                     Text("·")
                         .font(.caption)
                         .foregroundStyle(HelmInk.muted)
 
-                    Text(project.workspaceRoot.lastPathComponent)
-                        .font(.system(size: 11, design: .monospaced))
-                        .foregroundStyle(HelmInk.muted)
-                        .lineLimit(1)
-
-                    Spacer(minLength: 0)
-
-                    Text("\(store.selectedProjectAgents.count) agents · \(store.selectedProjectTasks.count) tasks")
+                    Text("\(store.selectedProjectAgents.count) crew · \(store.selectedProjectTasks.count) tasks")
                         .font(.caption)
                         .monospacedDigit()
                         .foregroundStyle(HelmInk.secondary)
                 }
             }
         }
-        .padding(HelmSpace.xl)
-        .background(HelmSurface.elevated, in: RoundedRectangle(cornerRadius: HelmRadius.card, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: HelmRadius.card, style: .continuous)
-                .strokeBorder(HelmSurface.line, lineWidth: 1.0)
-        )
+        .padding(18)
+        .helmCard(cornerRadius: HelmRadius.hero)
         .onChange(of: pingCount) { _, _ in
             guard !effectiveReduceMotion else { return }
-            pulseOpacity = 0.65
+            pulseOpacity = 0.95
             withAnimation(HelmMotion.pulseSweep) {
-                pulseOpacity = 0.15
+                pulseOpacity = 0.35
             }
         }
     }
 
-    // MARK: - Specialized Agent Roster
+    private func calmStatusSummary(for project: Project, openCount: Int) -> String {
+        if openCount > 0 {
+            return "Paused — waiting for your decision"
+        }
+        switch project.status {
+        case .running:
+            return "Running quietly in background · zero interruptions"
+        case .completed:
+            return "All tasks finished quietly"
+        case .paused:
+            return "Watch paused · resume anytime"
+        case .idle:
+            return "Ready to deploy your autonomous crew"
+        case .held:
+            return "Paused for review"
+        case .failed:
+            return "Needs attention to recover"
+        }
+    }
 
-    private var agentRosterSection: some View {
-        VStack(alignment: .leading, spacing: HelmSpace.s) {
+    // MARK: - Living Crew Stage (Prominent Animated Bot Grid)
+
+    private var crewStageSection: some View {
+        let columns = [GridItem(.adaptive(minimum: 220, maximum: 340), spacing: 14)]
+
+        return VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text("Specialized Agent Roster")
-                    .font(.headline)
+                Text("Autonomous Crew")
+                    .font(.headline.weight(.semibold))
                     .foregroundStyle(HelmInk.primary)
-                Spacer()
+
                 Text("\(store.selectedProjectAgents.count)")
                     .font(.caption.weight(.semibold))
                     .monospacedDigit()
                     .foregroundStyle(HelmInk.secondary)
-            }
-            .padding(.top, HelmSpace.xl)
-            .padding(.bottom, HelmSpace.s)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 2)
+                    .background(HelmSurface.elevated, in: Capsule())
+                    .overlay(Capsule().strokeBorder(HelmSurface.line, lineWidth: 0.75))
 
-            VStack(spacing: 0) {
-                if store.selectedProjectAgents.isEmpty {
-                    Text("No agents deployed yet. Add at least two specialists alongside the Orchestrator.")
-                        .font(.callout)
-                        .foregroundStyle(HelmInk.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(HelmSpace.xl)
-                } else {
-                    ForEach(Array(store.selectedProjectAgents.enumerated()), id: \.element.id) { index, agent in
-                        if index > 0 {
-                            Divider().overlay(HelmSurface.line)
-                        }
-                        agentRow(agent)
+                Spacer()
+
+                Text("Click any bot to inspect")
+                    .font(.caption)
+                    .foregroundStyle(HelmInk.muted)
+            }
+
+            if store.selectedProjectAgents.isEmpty {
+                HStack(spacing: 16) {
+                    AgentCharacterCanvas(
+                        seed: AgentCharacterSeed(agentID: UUID(uuidString: "22222222-2222-2222-2222-222222222201")!, isOrchestrator: false),
+                        state: .idle,
+                        size: 52,
+                        showStageBacking: true,
+                        interactive: true
+                    )
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Your stage is empty")
+                            .font(.body.weight(.semibold))
+                            .foregroundStyle(HelmInk.primary)
+                        Text("Add specialized agents — researchers, coders, or browser analysts — to start autonomous work.")
+                            .font(.callout)
+                            .foregroundStyle(HelmInk.secondary)
+                    }
+                    Spacer()
+                    Button {
+                        store.showAddAgentSheet = true
+                    } label: {
+                        Label("Add Agent", systemImage: "plus")
+                    }
+                    .buttonStyle(HelmPrimaryButtonStyle())
+                }
+                .padding(18)
+                .helmCard(cornerRadius: HelmRadius.card)
+            } else {
+                LazyVGrid(columns: columns, alignment: .leading, spacing: 14) {
+                    ForEach(store.selectedProjectAgents) { agent in
+                        agentStageCard(agent)
                     }
                 }
             }
-            .background(HelmSurface.elevated, in: RoundedRectangle(cornerRadius: HelmRadius.card, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: HelmRadius.card, style: .continuous)
-                    .strokeBorder(HelmSurface.line, lineWidth: 1.0)
-            )
         }
     }
 
-    private func agentRow(_ agent: AgentProfile) -> some View {
-        let isSelected = store.selectedAgent?.id == agent.id
+    private func agentStageCard(_ agent: AgentProfile) -> some View {
+        let isSelected = store.isInspectorVisible && store.selectedAgent?.id == agent.id
+        let isHovered = hoveredAgentID == agent.id
+        let isLead = agent.role == .orchestrator
 
         return Button {
-            store.selectedAgentID = agent.id
+            withAnimation(effectiveReduceMotion ? HelmMotion.exit : HelmMotion.state) {
+                store.inspectAgent(agent.id)
+            }
         } label: {
-            HStack(spacing: HelmSpace.l) {
-                AgentCharacterCanvas(seed: agent.characterSeed, state: agent.activityState, size: 24)
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(alignment: .top, spacing: 12) {
+                    AgentCharacterCanvas(
+                        seed: agent.characterSeed,
+                        state: agent.activityState,
+                        size: 56,
+                        showStageBacking: true,
+                        interactive: false
+                    )
 
-                VStack(alignment: .leading, spacing: HelmSpace.xxs) {
-                    HStack(spacing: HelmSpace.m) {
-                        Text(agent.name)
-                            .font(.body.weight(.semibold))
-                            .foregroundStyle(HelmInk.primary)
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack(spacing: 6) {
+                            Text(agent.name)
+                                .font(.body.weight(.semibold))
+                                .foregroundStyle(HelmInk.primary)
+                                .lineLimit(1)
+
+                            if isLead {
+                                Text("Lead")
+                                    .font(.system(size: 10, weight: .semibold))
+                                    .foregroundStyle(HelmAccent.brass)
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 1.5)
+                                    .background(HelmAccent.brassSoft, in: Capsule())
+                            }
+                        }
+
+                        Text("\(agent.role.displayName) · \(agent.backend.displayName)")
+                            .font(.caption)
+                            .foregroundStyle(HelmInk.secondary)
                             .lineLimit(1)
 
-                        MetadataTag(agent.role.displayName)
-                        MetadataTag(agent.backend.displayName)
+                        AgentStatusBadge(state: agent.activityState)
+                            .padding(.top, 2)
                     }
 
-                    Text(agent.goal)
-                        .font(.callout)
-                        .foregroundStyle(HelmInk.secondary)
-                        .lineLimit(1)
-                        .help(agent.goal)
+                    Spacer(minLength: 0)
                 }
 
-                Spacer(minLength: HelmSpace.m)
-
-                AgentStatusBadge(state: agent.activityState)
+                Text(agent.goal)
+                    .font(.caption)
+                    .foregroundStyle(HelmInk.secondary)
+                    .lineLimit(2)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .padding(.horizontal, HelmSpace.xl)
-            .padding(.vertical, HelmSpace.l)
-            .background(isSelected ? HelmSurface.selectedWash : Color.clear)
+            .padding(14)
+            .helmCard(
+                cornerRadius: HelmRadius.card,
+                isSelected: isSelected,
+                accentBorder: agent.activityState == .exception
+                    ? HelmSemantic.attention.opacity(0.55)
+                    : (isLead && !isSelected ? HelmAccent.brass.opacity(0.28) : nil)
+            )
+            .offset(y: isHovered && !effectiveReduceMotion ? -2 : 0)
+            .animation(HelmMotion.bouncy, value: isHovered)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .onHover { hovering in
+            hoveredAgentID = hovering ? agent.id : (hoveredAgentID == agent.id ? nil : hoveredAgentID)
+        }
     }
 
-    // MARK: - Delegated Task DAG & Shared State Board
+    // MARK: - Active Tasks & Shared Memory
 
     private var delegatedTasksColumn: some View {
-        VStack(alignment: .leading, spacing: HelmSpace.s) {
+        VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Text("Delegated Tasks")
-                    .font(.headline)
+                Text("Tasks")
+                    .font(.headline.weight(.semibold))
                     .foregroundStyle(HelmInk.primary)
                 Spacer()
                 Text("\(store.selectedProjectTasks.count)")
@@ -334,16 +407,19 @@ public struct ProjectCanvasView: View {
                     .monospacedDigit()
                     .foregroundStyle(HelmInk.secondary)
             }
-            .padding(.top, HelmSpace.xl)
-            .padding(.bottom, HelmSpace.s)
 
             VStack(spacing: 0) {
                 if store.selectedProjectTasks.isEmpty {
-                    Text("No tasks delegated yet. Start the Orchestrator watch to decompose the project goal.")
-                        .font(.callout)
-                        .foregroundStyle(HelmInk.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(HelmSpace.xl)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("No tasks yet")
+                            .font(.callout.weight(.medium))
+                            .foregroundStyle(HelmInk.primary)
+                        Text("Press Start Watch and Compass will break your project goal into tasks for your crew.")
+                            .font(.caption)
+                            .foregroundStyle(HelmInk.secondary)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(18)
                 } else {
                     ForEach(Array(store.selectedProjectTasks.enumerated()), id: \.element.id) { index, task in
                         if index > 0 {
@@ -353,30 +429,29 @@ public struct ProjectCanvasView: View {
                     }
                 }
             }
-            .background(HelmSurface.elevated, in: RoundedRectangle(cornerRadius: HelmRadius.card, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: HelmRadius.card, style: .continuous)
-                    .strokeBorder(HelmSurface.line, lineWidth: 1.0)
-            )
+            .helmCard(cornerRadius: HelmRadius.card)
         }
     }
 
     private func taskRow(_ task: DelegatedTask) -> some View {
         let assignee = store.selectedProjectAgents.first(where: { $0.id == task.assignedAgentID })
 
-        return VStack(alignment: .leading, spacing: HelmSpace.s) {
-            HStack(alignment: .top, spacing: HelmSpace.m) {
-                VStack(alignment: .leading, spacing: HelmSpace.xxs) {
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .top, spacing: 10) {
+                VStack(alignment: .leading, spacing: 3) {
                     Text(task.title)
-                        .font(.body.weight(.medium))
+                        .font(.callout.weight(.semibold))
                         .foregroundStyle(HelmInk.primary)
                         .lineLimit(2)
 
-                    HStack(spacing: HelmSpace.m) {
+                    HStack(spacing: 8) {
                         if let assignee {
-                            Text(assignee.name)
-                                .font(.caption)
-                                .foregroundStyle(HelmInk.secondary)
+                            HStack(spacing: 5) {
+                                AgentCharacterCanvas(seed: assignee.characterSeed, state: assignee.activityState, size: 16)
+                                Text(assignee.name)
+                                    .font(.caption)
+                                    .foregroundStyle(HelmInk.secondary)
+                            }
                         }
                         if !task.waitingOn.isEmpty {
                             Text("Waiting on \(task.waitingOn.count)")
@@ -399,15 +474,15 @@ public struct ProjectCanvasView: View {
                     .lineLimit(2)
             }
         }
-        .padding(.horizontal, HelmSpace.xl)
-        .padding(.vertical, HelmSpace.l)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 13)
     }
 
     private var sharedStateColumn: some View {
-        VStack(alignment: .leading, spacing: HelmSpace.s) {
+        VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Text("Shared State Board")
-                    .font(.headline)
+                Text("Shared Memory")
+                    .font(.headline.weight(.semibold))
                     .foregroundStyle(HelmInk.primary)
                 Spacer()
                 Text("\(store.selectedProjectSharedState.count)")
@@ -415,16 +490,19 @@ public struct ProjectCanvasView: View {
                     .monospacedDigit()
                     .foregroundStyle(HelmInk.secondary)
             }
-            .padding(.top, HelmSpace.xl)
-            .padding(.bottom, HelmSpace.s)
 
             VStack(spacing: 0) {
                 if store.selectedProjectSharedState.isEmpty {
-                    Text("No shared state recorded yet. Verified facts, rules, and web observations appear here.")
-                        .font(.callout)
-                        .foregroundStyle(HelmInk.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(HelmSpace.xl)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Shared memory is clear")
+                            .font(.callout.weight(.medium))
+                            .foregroundStyle(HelmInk.primary)
+                        Text("Verified facts, project rules, and web observations captured by your crew appear here.")
+                            .font(.caption)
+                            .foregroundStyle(HelmInk.secondary)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(18)
                 } else {
                     ForEach(Array(store.selectedProjectSharedState.enumerated()), id: \.element.id) { index, entry in
                         if index > 0 {
@@ -434,19 +512,15 @@ public struct ProjectCanvasView: View {
                     }
                 }
             }
-            .background(HelmSurface.elevated, in: RoundedRectangle(cornerRadius: HelmRadius.card, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: HelmRadius.card, style: .continuous)
-                    .strokeBorder(HelmSurface.line, lineWidth: 1.0)
-            )
+            .helmCard(cornerRadius: HelmRadius.card)
         }
     }
 
     private func sharedStateRow(_ entry: RunSharedStateSummary) -> some View {
-        VStack(alignment: .leading, spacing: HelmSpace.s) {
-            HStack(spacing: HelmSpace.m) {
-                Text(entry.key)
-                    .font(.system(size: 12, weight: .semibold, design: .monospaced))
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Text(friendlyKey(entry.key))
+                    .font(.callout.weight(.semibold))
                     .foregroundStyle(HelmInk.primary)
                     .lineLimit(1)
 
@@ -456,40 +530,75 @@ public struct ProjectCanvasView: View {
             }
 
             Text(entry.content)
-                .font(.callout)
+                .font(.caption)
                 .foregroundStyle(HelmInk.secondary)
                 .lineLimit(2)
-
-            HStack(spacing: HelmSpace.m) {
-                MetadataTag(entry.category.rawValue)
-                Text("sha256:\(String(entry.digest.prefix(10)))")
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundStyle(HelmInk.muted)
-            }
         }
-        .padding(.horizontal, HelmSpace.xl)
-        .padding(.vertical, HelmSpace.l)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 13)
+        .help("Key: \(entry.key) · Digest: \(String(entry.digest.prefix(12)))")
     }
 
+    private func friendlyKey(_ raw: String) -> String {
+        raw.replacingOccurrences(of: "_", with: " ")
+            .replacingOccurrences(of: ".", with: " · ")
+            .capitalized
+    }
+
+    // MARK: - Inviting Empty Workspace (when onboarding skipped)
+
     private var emptyWorkspaceView: some View {
-        VStack(spacing: HelmSpace.xl) {
-            CompassHelmLogo(size: 64, style: .emblem, hasOpenException: false, settleTrigger: store.settleHelmCounter)
-            VStack(spacing: HelmSpace.s) {
-                Text("Create Your First Autonomous Project")
-                    .font(.title2.weight(.semibold))
+        VStack(spacing: 24) {
+            HStack(spacing: 14) {
+                AgentCharacterCanvas(
+                    seed: AgentCharacterSeed(agentID: UUID(uuidString: "33333333-3333-3333-3333-333333333301")!, isOrchestrator: true),
+                    state: .idle,
+                    size: 58,
+                    showStageBacking: true,
+                    interactive: true
+                )
+                AgentCharacterCanvas(
+                    seed: AgentCharacterSeed(agentID: UUID(uuidString: "33333333-3333-3333-3333-333333333302")!, isOrchestrator: false),
+                    state: .executing,
+                    size: 58,
+                    showStageBacking: true,
+                    interactive: true
+                )
+                AgentCharacterCanvas(
+                    seed: AgentCharacterSeed(agentID: UUID(uuidString: "33333333-3333-3333-3333-333333333303")!, isOrchestrator: false),
+                    state: .browsing,
+                    size: 58,
+                    showStageBacking: true,
+                    interactive: true
+                )
+            }
+
+            VStack(spacing: 8) {
+                Text("Ready when you are")
+                    .font(.system(size: 24, weight: .bold, design: .rounded))
                     .foregroundStyle(HelmInk.primary)
-                Text("Spin up a local workspace with specialized agents governed by an exception-only Orchestrator.")
+                Text("Create a project or walk through the 30-second setup to configure your AI provider and deploy your first crew.")
                     .font(.body)
                     .foregroundStyle(HelmInk.secondary)
                     .multilineTextAlignment(.center)
-                    .frame(maxWidth: 420)
+                    .frame(maxWidth: 440)
             }
-            Button {
-                store.showNewProjectSheet = true
-            } label: {
-                Label("New Project", systemImage: "plus")
+
+            HStack(spacing: 12) {
+                Button {
+                    store.showNewProjectSheet = true
+                } label: {
+                    Label("New Project", systemImage: "plus")
+                }
+                .buttonStyle(HelmPrimaryButtonStyle())
+
+                Button {
+                    store.reopenOnboarding()
+                } label: {
+                    Label("Guided Setup", systemImage: "sparkles")
+                }
+                .buttonStyle(HelmSecondaryButtonStyle())
             }
-            .buttonStyle(HelmPrimaryButtonStyle())
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(HelmSurface.canvas)

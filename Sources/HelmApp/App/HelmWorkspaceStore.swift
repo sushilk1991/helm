@@ -4,6 +4,67 @@ import HelmCore
 import HelmIsolation
 import Observation
 
+public struct LocalEnvironmentStatus: Sendable, Equatable {
+    public let virtualizationAvailable: Bool
+    public let chromeAvailable: Bool
+    public let claudeCLIAvailable: Bool
+    public let codexCLIAvailable: Bool
+    public let foundationModelsSupported: Bool
+
+    public static func detect(environment: [String: String] = ProcessInfo.processInfo.environment) -> LocalEnvironmentStatus {
+        let fm = FileManager.default
+        let chromePath = environment["HELM_CHROME_PATH"] ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+        let chrome = fm.isExecutableFile(atPath: chromePath)
+        let claude = isToolOnPath("claude", environment: environment)
+        let codex = isToolOnPath("codex", environment: environment)
+        let supportsFM: Bool
+        if #available(macOS 26.0, *) {
+            supportsFM = true
+        } else {
+            supportsFM = false
+        }
+        return LocalEnvironmentStatus(
+            virtualizationAvailable: EntitlementChecker.isVirtualizationAvailable(),
+            chromeAvailable: chrome,
+            claudeCLIAvailable: claude,
+            codexCLIAvailable: codex,
+            foundationModelsSupported: supportsFM
+        )
+    }
+
+    public var recommendedBackend: LLMBackendKind {
+        if claudeCLIAvailable { return .claudeCLI }
+        if codexCLIAvailable { return .codexCLI }
+        if foundationModelsSupported { return .foundationModels }
+        return .mock
+    }
+
+    private static func isToolOnPath(_ name: String, environment: [String: String]) -> Bool {
+        let fm = FileManager.default
+        let searchDirs = [
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+            "\(NSHomeDirectory())/.local/bin",
+            "\(NSHomeDirectory())/.npm-global/bin",
+        ] + (environment["PATH"]?.split(separator: ":").map(String.init) ?? [])
+        for dir in searchDirs {
+            let full = (dir as NSString).appendingPathComponent(name)
+            if fm.isExecutableFile(atPath: full) {
+                return true
+            }
+        }
+        return false
+    }
+}
+
+public enum InspectorTab: String, CaseIterable, Identifiable, Sendable {
+    case agent = "Agent"
+    case activity = "Activity"
+    case timeline = "Timeline"
+
+    public var id: String { rawValue }
+}
+
 @MainActor
 @Observable
 public final class HelmWorkspaceStore {
@@ -15,9 +76,23 @@ public final class HelmWorkspaceStore {
 
     public var selectedProjectID: UUID?
     public var selectedAgentID: UUID?
-    public var isInspectorVisible: Bool = true
+    public var isInspectorVisible: Bool = false
+    public var inspectorTab: InspectorTab = .agent
     public var showNewProjectSheet: Bool = false
     public var showAddAgentSheet: Bool = false
+    public var showOnboarding: Bool = false
+    public var hasCompletedOnboarding: Bool = false
+
+    public var defaultBackend: LLMBackendKind = .mock
+    public var apiBaseURL: String = ""
+    public var apiKeyInput: String = ""
+    public var environmentStatus: LocalEnvironmentStatus = LocalEnvironmentStatus(
+        virtualizationAvailable: EntitlementChecker.isVirtualizationAvailable(),
+        chromeAvailable: false,
+        claudeCLIAvailable: false,
+        codexCLIAvailable: false,
+        foundationModelsSupported: false
+    )
 
     public var isWindowOccluded: Bool = false
     public var forcedReduceMotion: Bool = false
@@ -41,6 +116,10 @@ public final class HelmWorkspaceStore {
     private var lastSteadyEventIDByProject: [UUID: UUID] = [:]
     private var lastExecutionEventIDByProject: [UUID: UUID] = [:]
     private var lastBrowserEventIDByProject: [UUID: UUID] = [:]
+
+    private static let onboardingKey = "helm.v1.onboardingCompleted"
+    private static let defaultBackendKey = "helm.v1.defaultBackend"
+    private static let apiBaseURLKey = "helm.v1.apiBaseURL"
 
     public init(
         controlPlane: HelmControlPlane,
@@ -75,7 +154,7 @@ public final class HelmWorkspaceStore {
         )
         let notif = NotificationCoordinator(arguments: arguments, environment: environment)
         let reduceMotion = arguments.contains("--reduce-motion") || environment["HELM_REDUCE_MOTION"] == "1"
-        return HelmWorkspaceStore(
+        let store = HelmWorkspaceStore(
             controlPlane: cp,
             ocrService: ocr,
             sandboxExecutor: router,
@@ -83,6 +162,17 @@ public final class HelmWorkspaceStore {
             notificationCoordinator: notif,
             forcedReduceMotion: reduceMotion
         )
+        let envStatus = LocalEnvironmentStatus.detect(environment: environment)
+        store.environmentStatus = envStatus
+        if let savedRaw = UserDefaults.standard.string(forKey: defaultBackendKey),
+           let saved = LLMBackendKind(rawValue: savedRaw) {
+            store.defaultBackend = saved
+        } else {
+            store.defaultBackend = envStatus.recommendedBackend
+        }
+        store.apiBaseURL = UserDefaults.standard.string(forKey: apiBaseURLKey) ?? ""
+        store.hasCompletedOnboarding = UserDefaults.standard.bool(forKey: onboardingKey)
+        return store
     }
 
     // MARK: - Derived Selections
@@ -163,18 +253,50 @@ public final class HelmWorkspaceStore {
         return latestExecutionResultByProject[project.id]
     }
 
+    // MARK: - Onboarding & Preferences
+
+    public func savePreferences(backend: LLMBackendKind, baseURL: String, apiKey: String) {
+        defaultBackend = backend
+        apiBaseURL = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        apiKeyInput = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        UserDefaults.standard.set(backend.rawValue, forKey: Self.defaultBackendKey)
+        UserDefaults.standard.set(apiBaseURL, forKey: Self.apiBaseURLKey)
+        if !apiBaseURL.isEmpty {
+            setenv("HELM_LLM_BASE_URL", apiBaseURL, 1)
+        }
+        if !apiKeyInput.isEmpty {
+            setenv("HELM_LLM_API_KEY", apiKeyInput, 1)
+        }
+    }
+
+    public func completeOnboarding() {
+        hasCompletedOnboarding = true
+        showOnboarding = false
+        UserDefaults.standard.set(true, forKey: Self.onboardingKey)
+    }
+
+    public func reopenOnboarding() {
+        environmentStatus = LocalEnvironmentStatus.detect()
+        showOnboarding = true
+    }
+
     // MARK: - Lifecycle & Polling
 
     public func bootstrapInteractive() async {
         Task.detached(priority: .utility) { [ocrService] in
             await ocrService.warmUpInBackground()
         }
+        environmentStatus = LocalEnvironmentStatus.detect()
         await reloadAll()
         if selectedProjectID == nil {
             selectedProjectID = controlPlane.projects.first?.id
         }
         if selectedAgentID == nil {
             selectedAgentID = selectedProjectAgents.first?.id
+        }
+        if controlPlane.projects.isEmpty && !hasCompletedOnboarding {
+            showOnboarding = true
+            isInspectorVisible = false
         }
         settleHelmCounter += 1
         ensurePollingState()
@@ -269,6 +391,12 @@ public final class HelmWorkspaceStore {
         }
     }
 
+    public func inspectAgent(_ agentID: UUID) {
+        selectedAgentID = agentID
+        inspectorTab = .agent
+        isInspectorVisible = true
+    }
+
     public func stopPollingForTermination() {
         pollingTask?.cancel()
         pollingTask = nil
@@ -324,7 +452,6 @@ public final class HelmWorkspaceStore {
             let withinGrace = !pendingStartProjectIDs.isEmpty && (pollingGraceDeadline.map { Date() < $0 } ?? false)
             return hasRunning || withinGrace
         } catch {
-            // Transient DB read retry next tick
             let withinGrace = !pendingStartProjectIDs.isEmpty && (pollingGraceDeadline.map { Date() < $0 } ?? false)
             return withinGrace || controlPlane.projects.contains { $0.status == .running }
         }
@@ -342,17 +469,34 @@ public final class HelmWorkspaceStore {
 
     // MARK: - User Actions
 
-    public func createProject(name: String, goal: String, workspaceRoot: URL) async throws {
+    public func createProject(
+        name: String,
+        goal: String,
+        workspaceRoot: URL,
+        backend: LLMBackendKind? = nil,
+        starterRoles: [AgentRole] = []
+    ) async throws {
+        let chosenBackend = backend ?? defaultBackend
         let project = try await controlPlane.createProject(name: name, goal: goal, workspaceRoot: workspaceRoot)
-        // Automatically ensure an Orchestrator agent exists so new projects are immediately operable
         _ = try await controlPlane.addAgent(
             projectID: project.id,
-            name: "Helm Orchestrator",
+            name: "Compass",
             role: .orchestrator,
-            goal: "Coordinate specialists, track shared state, and surface exceptions only when human intervention is needed.",
-            backend: .mock,
+            goal: "Coordinate specialists, maintain shared memory, and alert you only when human judgment is needed.",
+            backend: chosenBackend,
             capabilities: [.readSharedState, .proposeSharedState, .delegateTasks, .requestHumanDecision]
         )
+        for role in starterRoles where role != .orchestrator {
+            let preset = AgentRolePreset.preset(for: role)
+            _ = try await controlPlane.addAgent(
+                projectID: project.id,
+                name: preset.name,
+                role: role,
+                goal: preset.goal,
+                backend: chosenBackend,
+                capabilities: preset.capabilities
+            )
+        }
         await reloadAll()
         selectProject(project.id)
     }

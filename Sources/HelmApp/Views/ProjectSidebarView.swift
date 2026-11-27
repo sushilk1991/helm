@@ -13,114 +13,130 @@ public struct ProjectSidebarView: View {
             // App Identity Header
             HStack(spacing: HelmSpace.m) {
                 CompassHelmLogo(
-                    size: 28,
+                    size: 30,
                     style: .emblem,
                     hasOpenException: store.totalOpenExceptionCount > 0,
                     settleTrigger: store.settleHelmCounter
                 )
                 VStack(alignment: .leading, spacing: 1) {
                     Text("Helm")
-                        .font(.headline)
+                        .font(.system(size: 15, weight: .bold, design: .rounded))
                         .foregroundStyle(HelmInk.primary)
-                    Text(store.totalOpenExceptionCount == 0 ? "All watches quiet" : "\(store.totalOpenExceptionCount) open hold\(store.totalOpenExceptionCount == 1 ? "" : "s")")
+                    Text(store.totalOpenExceptionCount == 0
+                        ? "All watches quiet"
+                        : "\(store.totalOpenExceptionCount) need\(store.totalOpenExceptionCount == 1 ? "s" : "") decision")
                         .font(.caption)
                         .monospacedDigit()
                         .foregroundStyle(store.totalOpenExceptionCount == 0 ? HelmInk.secondary : HelmSemantic.attention)
                 }
                 Spacer(minLength: 0)
             }
-            .padding(.horizontal, HelmSpace.l)
-            .padding(.vertical, HelmSpace.l)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 14)
 
-            Divider()
-                .overlay(HelmSurface.line)
+            Divider().overlay(HelmSurface.line)
 
             ScrollView {
-                VStack(alignment: .leading, spacing: HelmSpace.xs) {
-                    Text("Projects")
-                        .font(.callout.weight(.semibold))
-                        .foregroundStyle(HelmInk.secondary)
-                        .padding(.horizontal, HelmSpace.l)
-                        .padding(.top, HelmSpace.xl)
-                        .padding(.bottom, HelmSpace.s)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("PROJECTS")
+                        .font(.system(size: 10, weight: .semibold))
+                        .tracking(0.8)
+                        .foregroundStyle(HelmInk.muted)
+                        .padding(.horizontal, 16)
+                        .padding(.top, 16)
+                        .padding(.bottom, 6)
 
                     if store.projects.isEmpty {
-                        Text("Create a project to deploy autonomous agents.")
+                        Text("No projects yet")
                             .font(.caption)
                             .foregroundStyle(HelmInk.muted)
-                            .padding(.horizontal, HelmSpace.l)
-                            .padding(.vertical, HelmSpace.m)
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 8)
                     } else {
                         ForEach(store.projects) { project in
                             projectRow(project)
                         }
                     }
 
-                    // Exception Inbox — completely absent/collapsed when 0 open exceptions
+                    // Exception Inbox — completely absent when 0 open exceptions
                     if !store.allOpenExceptions.isEmpty {
-                        Text("Exception Inbox")
-                            .font(.callout.weight(.semibold))
+                        Text("NEEDS DECISION")
+                            .font(.system(size: 10, weight: .semibold))
+                            .tracking(0.8)
                             .foregroundStyle(HelmSemantic.attention)
-                            .padding(.horizontal, HelmSpace.l)
-                            .padding(.top, HelmSpace.xl)
-                            .padding(.bottom, HelmSpace.s)
+                            .padding(.horizontal, 16)
+                            .padding(.top, 18)
+                            .padding(.bottom, 6)
 
                         ForEach(store.allOpenExceptions, id: \.alert.id) { item in
                             exceptionInboxRow(project: item.project, alert: item.alert)
                         }
                     }
                 }
-                .padding(.bottom, HelmSpace.xl)
+                .padding(.bottom, 16)
             }
 
-            Divider()
-                .overlay(HelmSurface.line)
+            Divider().overlay(HelmSurface.line)
 
-            // Footer actions + virtualization status
-            VStack(alignment: .leading, spacing: HelmSpace.m) {
-                Button {
-                    store.showNewProjectSheet = true
-                } label: {
-                    Label("New Project", systemImage: "plus")
-                        .frame(maxWidth: .infinity, alignment: .center)
+            // Footer actions + subtle environment & setup controls
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 8) {
+                    Button {
+                        store.showNewProjectSheet = true
+                    } label: {
+                        Label("New Project", systemImage: "plus")
+                            .frame(maxWidth: .infinity, alignment: .center)
+                    }
+                    .buttonStyle(HelmPrimaryButtonStyle())
+
+                    Button {
+                        store.reopenOnboarding()
+                    } label: {
+                        Image(systemName: "slider.horizontal.3")
+                            .foregroundStyle(HelmInk.secondary)
+                    }
+                    .buttonStyle(HelmSecondaryButtonStyle())
+                    .help("Setup & AI Provider Preferences")
                 }
-                .buttonStyle(HelmPrimaryButtonStyle())
 
-                HStack(spacing: HelmSpace.s) {
-                    Image(systemName: store.virtualizationAvailable ? "checkmark.shield.fill" : "shield.lefthalf.filled")
-                        .font(.caption)
-                        .foregroundStyle(store.virtualizationAvailable ? HelmSemantic.steady : HelmInk.secondary)
-                    Text(store.virtualizationAvailable ? "VZ Micro-VM Ready" : "Seatbelt Sandbox Ready")
+                HStack(spacing: 6) {
+                    Circle()
+                        .fill(HelmSemantic.steady)
+                        .frame(width: 6, height: 6)
+                    Text(store.virtualizationAvailable ? "Apple VM Ready" : "Sandbox Ready")
                         .font(.caption)
                         .foregroundStyle(HelmInk.secondary)
                     Spacer(minLength: 0)
+                    Text(store.defaultBackend.displayName)
+                        .font(.caption)
+                        .foregroundStyle(HelmInk.muted)
                 }
             }
-            .padding(HelmSpace.l)
+            .padding(14)
         }
-        .frame(width: 240)
+        .frame(width: 244)
         .background(HelmSurface.sidebar)
     }
 
     private func projectRow(_ project: Project) -> some View {
         let isSelected = store.selectedProject?.id == project.id
         let openCount = (store.controlPlane.openExceptionsByProject[project.id] ?? []).count
+        let crewCount = (store.controlPlane.agentsByProject[project.id] ?? []).count
 
         return Button {
             store.selectProject(project.id)
         } label: {
-            HStack(alignment: .top, spacing: HelmSpace.m) {
+            HStack(alignment: .center, spacing: 10) {
                 Image(systemName: statusSymbol(for: project.status, openCount: openCount))
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(.system(size: 10, weight: .semibold))
                     .foregroundStyle(statusColor(for: project.status, openCount: openCount))
-                    .padding(.top, 3)
 
-                VStack(alignment: .leading, spacing: HelmSpace.xxs) {
+                VStack(alignment: .leading, spacing: 2) {
                     Text(project.name)
-                        .font(.body.weight(isSelected ? .semibold : .medium))
+                        .font(.callout.weight(isSelected ? .semibold : .medium))
                         .foregroundStyle(HelmInk.primary)
                         .lineLimit(1)
-                    Text(project.goal)
+                    Text(crewCount > 0 ? "\(crewCount) agent\(crewCount == 1 ? "" : "s")" : project.goal)
                         .font(.caption)
                         .foregroundStyle(HelmInk.secondary)
                         .lineLimit(1)
@@ -133,18 +149,18 @@ public struct ProjectSidebarView: View {
                         .font(.caption.weight(.semibold))
                         .monospacedDigit()
                         .foregroundStyle(HelmSemantic.attention)
-                        .padding(.horizontal, HelmSpace.s)
+                        .padding(.horizontal, 6)
                         .padding(.vertical, 1)
                         .background(HelmSemantic.attentionSoft, in: Capsule())
                 }
             }
-            .padding(.horizontal, HelmSpace.l)
-            .padding(.vertical, HelmSpace.m)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 9)
             .background(
                 RoundedRectangle(cornerRadius: HelmRadius.control, style: .continuous)
                     .fill(isSelected ? HelmSurface.selectedWash : Color.clear)
-                    .padding(.horizontal, HelmSpace.m)
             )
+            .padding(.horizontal, 8)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -155,25 +171,25 @@ public struct ProjectSidebarView: View {
         Button {
             store.selectProject(project.id)
         } label: {
-            HStack(alignment: .top, spacing: HelmSpace.m) {
+            HStack(alignment: .top, spacing: 8) {
                 Image(systemName: alert.severity == .critical ? "exclamationmark.octagon.fill" : "exclamationmark.triangle.fill")
                     .font(.caption)
                     .foregroundStyle(alert.severity == .critical ? HelmSemantic.critical : HelmSemantic.attention)
                     .padding(.top, 2)
-                VStack(alignment: .leading, spacing: HelmSpace.xxs) {
+                VStack(alignment: .leading, spacing: 2) {
                     Text(alert.title)
-                        .font(.callout.weight(.medium))
+                        .font(.caption.weight(.semibold))
                         .foregroundStyle(HelmInk.primary)
                         .lineLimit(1)
                     Text(project.name)
-                        .font(.caption)
+                        .font(.caption2)
                         .foregroundStyle(HelmInk.secondary)
                         .lineLimit(1)
                 }
                 Spacer(minLength: 0)
             }
-            .padding(.horizontal, HelmSpace.l)
-            .padding(.vertical, HelmSpace.s)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 6)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)

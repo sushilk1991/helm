@@ -76,7 +76,12 @@ public actor HelmDatabase {
         if currentVersion < HelmDatabaseSchema.currentVersion {
             try Self.execRaw(on: opened, sql: "BEGIN IMMEDIATE;")
             do {
-                try Self.execRaw(on: opened, sql: HelmDatabaseSchema.migrationV1SQL)
+                if currentVersion < 1 {
+                    try Self.execRaw(on: opened, sql: HelmDatabaseSchema.migrationV1SQL)
+                }
+                if currentVersion < 2 {
+                    try Self.execRaw(on: opened, sql: HelmDatabaseSchema.migrationV2SQL)
+                }
                 try Self.execRaw(on: opened, sql: "PRAGMA user_version = \(HelmDatabaseSchema.currentVersion);")
                 try Self.execRaw(on: opened, sql: "COMMIT;")
             } catch {
@@ -190,8 +195,9 @@ public actor HelmDatabase {
         let sql = """
         INSERT INTO agents (
             id, project_id, name, role, goal, capabilities_json, backend_kind,
-            model_override, activity_state, character_seed_json, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+            model_override, activity_state, character_seed_json, created_at, updated_at,
+            personality, personality_notes
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
         """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
@@ -207,13 +213,16 @@ public actor HelmDatabase {
         try bindText(stmt, index: 10, value: seedJSON)
         try bindDouble(stmt, index: 11, value: agent.createdAt.timeIntervalSince1970)
         try bindDouble(stmt, index: 12, value: agent.updatedAt.timeIntervalSince1970)
+        try bindText(stmt, index: 13, value: agent.personality.rawValue)
+        try bindText(stmt, index: 14, value: agent.personalityNotes)
         try stepDone(stmt)
     }
 
     public func fetchAgent(id: UUID) throws -> AgentProfile? {
         let sql = """
         SELECT id, project_id, name, role, goal, capabilities_json, backend_kind,
-               model_override, activity_state, character_seed_json, created_at, updated_at
+               model_override, activity_state, character_seed_json, created_at, updated_at,
+               personality, personality_notes
         FROM agents WHERE id = ?;
         """
         let stmt = try prepare(sql)
@@ -230,7 +239,8 @@ public actor HelmDatabase {
     public func listAgents(projectID: UUID) throws -> [AgentProfile] {
         let sql = """
         SELECT id, project_id, name, role, goal, capabilities_json, backend_kind,
-               model_override, activity_state, character_seed_json, created_at, updated_at
+               model_override, activity_state, character_seed_json, created_at, updated_at,
+               personality, personality_notes
         FROM agents WHERE project_id = ? ORDER BY created_at ASC;
         """
         let stmt = try prepare(sql)
@@ -246,6 +256,31 @@ public actor HelmDatabase {
             out.append(try decodeAgentRow(stmt))
         }
         return out
+    }
+
+    public func updateAgent(_ agent: AgentProfile) throws {
+        let capsJSON = try encodeJSONString(Array(agent.capabilities).sorted { $0.rawValue < $1.rawValue })
+        let sql = """
+        UPDATE agents
+        SET name = ?, goal = ?, capabilities_json = ?, backend_kind = ?,
+            model_override = ?, personality = ?, personality_notes = ?, updated_at = ?
+        WHERE id = ?;
+        """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        try bindText(stmt, index: 1, value: agent.name)
+        try bindText(stmt, index: 2, value: agent.goal)
+        try bindText(stmt, index: 3, value: capsJSON)
+        try bindText(stmt, index: 4, value: agent.backend.rawValue)
+        try bindOptionalText(stmt, index: 5, value: agent.modelOverride)
+        try bindText(stmt, index: 6, value: agent.personality.rawValue)
+        try bindText(stmt, index: 7, value: agent.personalityNotes)
+        try bindDouble(stmt, index: 8, value: agent.updatedAt.timeIntervalSince1970)
+        try bindText(stmt, index: 9, value: agent.id.uuidString)
+        try stepDone(stmt)
+        if sqlite3_changes(box.db) == 0 {
+            throw HelmDatabaseError.notFound("Agent \(agent.id.uuidString)")
+        }
     }
 
     public func updateAgentState(id: UUID, state: AgentActivityState, updatedAt: Date = Date()) throws {
@@ -1265,12 +1300,17 @@ public actor HelmDatabase {
         let seed = try decodeJSONString(AgentCharacterSeed.self, from: seedJSON)
         let createdAt = Date(timeIntervalSince1970: sqlite3_column_double(stmt, 10))
         let updatedAt = Date(timeIntervalSince1970: sqlite3_column_double(stmt, 11))
+        let personality = columnText(stmt, index: 12).flatMap(AgentPersonality.init(rawValue:))
+            ?? AgentPersonality.defaultForRole(role)
+        let personalityNotes = columnText(stmt, index: 13) ?? ""
         return AgentProfile(
             id: id,
             projectID: projectID,
             name: name,
             role: role,
             goal: goal,
+            personality: personality,
+            personalityNotes: personalityNotes,
             capabilities: Set(capsList),
             backend: backend,
             modelOverride: modelOverride,

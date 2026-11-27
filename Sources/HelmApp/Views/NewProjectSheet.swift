@@ -7,10 +7,12 @@ public struct NewProjectSheet: View {
     @Bindable var store: HelmWorkspaceStore
     @Environment(\.dismiss) private var dismiss
 
-    @State private var name: String = ""
-    @State private var goal: String = ""
     @State private var workspacePath: String = ""
+    @State private var name: String = ""
+    @State private var didManuallyEditName: Bool = false
+    @State private var goal: String = ""
     @State private var backend: LLMBackendKind = .mock
+    @State private var leadPersonality: AgentPersonality = .calmCommander
     @State private var starterRoles: Set<AgentRole> = [.researcher, .coder]
     @State private var validationError: String?
     @State private var isSubmitting: Bool = false
@@ -21,6 +23,13 @@ public struct NewProjectSheet: View {
         self.store = store
     }
 
+    private var resolvedName: String {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty { return trimmed }
+        let folder = URL(fileURLWithPath: workspacePath).lastPathComponent
+        return (folder.isEmpty || folder == "/") ? "" : folder
+    }
+
     public var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             HStack(spacing: 12) {
@@ -29,62 +38,101 @@ public struct NewProjectSheet: View {
                     Text("New Autonomous Project")
                         .font(.title3.weight(.bold))
                         .foregroundStyle(HelmInk.primary)
-                    Text("Deploys an exception-only Orchestrator plus your chosen starter crew in an isolated local workspace.")
+                    Text("Pick a repo or folder — Helm automatically uses its name and deploys your crew.")
                         .font(.caption)
                         .foregroundStyle(HelmInk.secondary)
                 }
             }
 
-            VStack(alignment: .leading, spacing: 12) {
-                HStack(spacing: 12) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Project Name")
+            VStack(alignment: .leading, spacing: 14) {
+                // 1. Repo / Folder picker FIRST (auto-fills project name!)
+                VStack(alignment: .leading, spacing: 5) {
+                    HStack {
+                        Text("Repository or Workspace Folder")
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(HelmInk.secondary)
-                        TextField("e.g., Harbor Telemetry Pipeline", text: $name)
+                        Spacer()
+                        if !resolvedName.isEmpty {
+                            Text("Project: \(resolvedName)")
+                                .font(.caption.weight(.medium))
+                                .foregroundStyle(HelmAccent.primary)
+                        }
+                    }
+                    HStack(spacing: 8) {
+                        TextField("/path/to/your-repo", text: $workspacePath)
+                            .font(.system(size: 12, design: .monospaced))
                             .textFieldStyle(.roundedBorder)
+                            .onChange(of: workspacePath) { _, newPath in
+                                if !didManuallyEditName {
+                                    let derived = URL(fileURLWithPath: newPath).lastPathComponent
+                                    if !derived.isEmpty && derived != "/" {
+                                        name = derived
+                                    }
+                                }
+                            }
+                        Button {
+                            pickFolder()
+                        } label: {
+                            Label("Choose Repo…", systemImage: "folder")
+                        }
+                        .buttonStyle(HelmSecondaryButtonStyle())
+                    }
+                }
+
+                // 2. Goal
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Goal")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(HelmInk.secondary)
+                    TextField("Describe what your autonomous crew should build, test, or monitor…", text: $goal, axis: .vertical)
+                        .lineLimit(2...4)
+                        .textFieldStyle(.roundedBorder)
+                }
+
+                // 3. Optional Display Name override + AI Provider + Lead Personality
+                HStack(spacing: 12) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Display Name (optional)")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(HelmInk.muted)
+                        TextField("Auto-filled from folder", text: $name)
+                            .textFieldStyle(.roundedBorder)
+                            .onChange(of: name) { _, newVal in
+                                let folderName = URL(fileURLWithPath: workspacePath).lastPathComponent
+                                didManuallyEditName = !newVal.isEmpty && newVal != folderName
+                            }
                     }
 
                     VStack(alignment: .leading, spacing: 4) {
                         Text("AI Provider")
                             .font(.caption.weight(.semibold))
-                            .foregroundStyle(HelmInk.secondary)
+                            .foregroundStyle(HelmInk.muted)
                         Picker("AI Provider", selection: $backend) {
                             ForEach(LLMBackendKind.allCases, id: \.self) { kind in
                                 Text(kind.displayName).tag(kind)
                             }
                         }
                         .labelsHidden()
-                        .frame(width: 150)
+                        .frame(width: 135)
                     }
-                }
 
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Goal")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(HelmInk.secondary)
-                    TextField("Describe the outcome the Orchestrator should achieve…", text: $goal, axis: .vertical)
-                        .lineLimit(2...4)
-                        .textFieldStyle(.roundedBorder)
-                }
-
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Workspace Folder")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(HelmInk.secondary)
-                    HStack(spacing: 8) {
-                        TextField("/path/to/workspace", text: $workspacePath)
-                            .font(.system(size: 12, design: .monospaced))
-                            .textFieldStyle(.roundedBorder)
-                        Button("Choose…") {
-                            pickFolder()
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Lead Personality")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(HelmInk.muted)
+                        Picker("Lead Personality", selection: $leadPersonality) {
+                            ForEach(AgentPersonality.allCases, id: \.self) { p in
+                                Text(p.displayName).tag(p)
+                            }
                         }
-                        .buttonStyle(HelmSecondaryButtonStyle())
+                        .labelsHidden()
+                        .frame(width: 165)
                     }
                 }
 
+                // 4. Starter Specialists
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("Starter Specialists (Compass Orchestrator included automatically)")
+                    Text("Starter Specialists (Compass Lead included automatically — add more anytime)")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(HelmInk.secondary)
 
@@ -148,15 +196,16 @@ public struct NewProjectSheet: View {
             }
         }
         .padding(22)
-        .frame(width: 540)
+        .frame(width: 580)
         .background(HelmSurface.canvas)
         .onAppear {
             backend = store.defaultBackend
             if workspacePath.isEmpty {
                 let docs = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
                     ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Application Support", isDirectory: true)
-                let defaultRoot = docs.appendingPathComponent("Helm/workspaces/project-\(UUID().uuidString.prefix(6).lowercased())")
+                let defaultRoot = docs.appendingPathComponent("Helm/workspaces/workspace-\(UUID().uuidString.prefix(5).lowercased())")
                 workspacePath = defaultRoot.path
+                name = defaultRoot.lastPathComponent
             }
         }
     }
@@ -169,24 +218,26 @@ public struct NewProjectSheet: View {
         panel.allowsMultipleSelection = false
         if panel.runModal() == .OK, let url = panel.url {
             workspacePath = url.path
+            name = url.lastPathComponent
+            didManuallyEditName = false
         }
     }
 
     private func submit() {
-        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        let trimmedGoal = goal.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedPath = workspacePath.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedName = resolvedName
+        let trimmedGoal = goal.trimmingCharacters(in: .whitespacesAndNewlines)
 
+        guard !trimmedPath.isEmpty else {
+            validationError = "Choose a repository or workspace folder."
+            return
+        }
         guard !trimmedName.isEmpty else {
-            validationError = "Project name cannot be empty."
+            validationError = "Choose a valid folder or enter a display name."
             return
         }
         guard !trimmedGoal.isEmpty else {
-            validationError = "Project goal cannot be empty."
-            return
-        }
-        guard !trimmedPath.isEmpty else {
-            validationError = "Workspace path cannot be empty."
+            validationError = "Describe the goal for your autonomous crew."
             return
         }
 
@@ -201,6 +252,7 @@ public struct NewProjectSheet: View {
                     goal: trimmedGoal,
                     workspaceRoot: url,
                     backend: backend,
+                    leadPersonality: leadPersonality,
                     starterRoles: ordered
                 )
                 dismiss()

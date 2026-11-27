@@ -278,7 +278,7 @@ public struct ProjectCanvasView: View {
 
                 Spacer()
 
-                Text("Click any bot to inspect")
+                Text("Click any bot to edit personality & permissions")
                     .font(.caption)
                     .foregroundStyle(HelmInk.muted)
             }
@@ -315,9 +315,48 @@ public struct ProjectCanvasView: View {
                     ForEach(store.selectedProjectAgents) { agent in
                         agentStageCard(agent)
                     }
+                    addAgentStageCard
                 }
             }
         }
+    }
+
+    private var addAgentStageCard: some View {
+        Button {
+            store.showAddAgentSheet = true
+        } label: {
+            VStack(spacing: 10) {
+                Image(systemName: "plus")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(HelmAccent.primary)
+                    .frame(width: 44, height: 44)
+                    .background(HelmAccent.primarySoft, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+
+                VStack(spacing: 2) {
+                    Text("Deploy New Agent")
+                        .font(.callout.weight(.semibold))
+                        .foregroundStyle(HelmInk.primary)
+                    Text("Add coder, researcher, browser, or custom bot")
+                        .font(.caption)
+                        .foregroundStyle(HelmInk.secondary)
+                        .multilineTextAlignment(.center)
+                        .lineLimit(2)
+                }
+            }
+            .frame(maxWidth: .infinity, minHeight: 132)
+            .padding(14)
+            .background(
+                RoundedRectangle(cornerRadius: HelmRadius.card, style: .continuous)
+                    .fill(HelmSurface.elevated.opacity(0.55))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: HelmRadius.card, style: .continuous)
+                    .strokeBorder(HelmSurface.lineStrong, style: StrokeStyle(lineWidth: 1.2, dash: [6, 4]))
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("Deploy another specialized agent (⇧⌘A)")
     }
 
     private func agentStageCard(_ agent: AgentProfile) -> some View {
@@ -362,8 +401,22 @@ public struct ProjectCanvasView: View {
                             .foregroundStyle(HelmInk.secondary)
                             .lineLimit(1)
 
-                        AgentStatusBadge(state: agent.activityState)
-                            .padding(.top, 2)
+                        HStack(spacing: 6) {
+                            AgentStatusBadge(state: agent.activityState)
+
+                            HStack(spacing: 3) {
+                                Image(systemName: agent.personality.symbolName)
+                                    .font(.system(size: 9))
+                                Text(agent.personality.displayName)
+                                    .font(.system(size: 10, weight: .medium))
+                                    .lineLimit(1)
+                            }
+                            .foregroundStyle(HelmInk.secondary)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2.5)
+                            .background(HelmSurface.well, in: Capsule())
+                        }
+                        .padding(.top, 2)
                     }
 
                     Spacer(minLength: 0)

@@ -175,6 +175,7 @@ public actor OrchestratorActor {
                     .mock: mock,
                     .claudeCLI: mock,
                     .codexCLI: mock,
+                    .piCLI: mock,
                     .directHTTP: mock,
                     .foundationModels: mock,
                 ])
@@ -188,6 +189,7 @@ public actor OrchestratorActor {
                     .mock: mock,
                     .claudeCLI: mock,
                     .codexCLI: mock,
+                    .piCLI: mock,
                     .directHTTP: mock,
                     .foundationModels: mock,
                 ])
@@ -198,6 +200,7 @@ public actor OrchestratorActor {
                     .mock: mock,
                     .claudeCLI: mock,
                     .codexCLI: mock,
+                    .piCLI: mock,
                     .directHTTP: mock,
                     .foundationModels: mock,
                 ])
@@ -669,12 +672,18 @@ public actor OrchestratorActor {
             backendToUse = targetAgents.first?.backend ?? .mock
         }
 
+        let orchPersonality = orchestrator?.personality ?? .calmCommander
+        let orchNotes = orchestrator?.personalityNotes ?? ""
+        let personalityDirective = orchNotes.isEmpty
+            ? "\(orchPersonality.displayName): \(orchPersonality.promptDirective)"
+            : "\(orchPersonality.displayName): \(orchPersonality.promptDirective) Custom traits: \(orchNotes)"
+
         let provider = try registry.provider(for: backendToUse)
         let request = LLMRequest(
             agentID: orchestrator?.id ?? project.id,
             projectID: project.id,
             stepIndex: 0,
-            systemPrompt: "Role: orchestrator\nDecompose the project goal into concrete tasks for the available specialized agents. Reply strictly with JSON {\"tasks\":[{\"temp_id\":\"t1\",\"title\":\"...\",\"instructions\":\"...\",\"assigned_agent_id\":\"<uuid>\",\"waiting_on_temp_ids\":[]}]}",
+            systemPrompt: "Role: orchestrator\nPersonality: \(personalityDirective)\nDecompose the project goal into concrete tasks for the available specialized agents. Reply strictly with JSON {\"tasks\":[{\"temp_id\":\"t1\",\"title\":\"...\",\"instructions\":\"...\",\"assigned_agent_id\":\"<uuid>\",\"waiting_on_temp_ids\":[]}]}",
             userPrompt: "DECOMPOSE_GOAL\nProject: \(project.name)\nGoal: \(project.goal)\n\(rosterLines)",
             timeoutSeconds: project.budgetPolicy.stepTimeoutSeconds
         )

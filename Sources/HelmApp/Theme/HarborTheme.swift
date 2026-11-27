@@ -269,8 +269,22 @@ public extension LLMBackendKind {
         case .mock: return "Demo Mode"
         case .claudeCLI: return "Claude"
         case .codexCLI: return "Codex"
+        case .piCLI: return "Pi CLI"
         case .directHTTP: return "OpenAI / API"
         case .foundationModels: return "Apple On-Device"
+        }
+    }
+}
+
+public extension AgentPersonality {
+    var symbolName: String {
+        switch self {
+        case .calmCommander: return "helm"
+        case .pragmaticBuilder: return "hammer.fill"
+        case .methodicalArchitect: return "compass.drawing"
+        case .adversarialReviewer: return "magnifyingglass.circle.fill"
+        case .creativeExplorer: return "sparkles"
+        case .rapidOperator: return "bolt.fill"
         }
     }
 }
@@ -278,13 +292,37 @@ public extension LLMBackendKind {
 public extension AgentCapability {
     var displayName: String {
         switch self {
-        case .codeExec: return "Sandbox Exec"
-        case .browser: return "Browser"
-        case .ocr: return "Vision OCR"
-        case .readSharedState: return "Read Memory"
-        case .proposeSharedState: return "Write Memory"
-        case .delegateTasks: return "Delegate"
-        case .requestHumanDecision: return "Ask Human"
+        case .codeExec: return "Run Code in Sandbox"
+        case .browser: return "Headless Browser"
+        case .ocr: return "Vision OCR Reading"
+        case .readSharedState: return "Read Shared Memory"
+        case .proposeSharedState: return "Write Shared Memory"
+        case .delegateTasks: return "Delegate Tasks"
+        case .requestHumanDecision: return "Ask Human Approval"
+        }
+    }
+
+    var humanDescription: String {
+        switch self {
+        case .codeExec: return "Run shell commands & tests inside the isolated VM or Seatbelt sandbox"
+        case .browser: return "Open and click pages in a background headless Chrome session"
+        case .ocr: return "Read visible text & button coordinates via Apple Vision OCR"
+        case .readSharedState: return "See verified facts, rules, and findings shared by the crew"
+        case .proposeSharedState: return "Publish new facts and observations for other agents"
+        case .delegateTasks: return "Break goals into subtasks and assign work to specialists"
+        case .requestHumanDecision: return "Pause and alert you before risky or ambiguous actions"
+        }
+    }
+
+    var symbolName: String {
+        switch self {
+        case .codeExec: return "terminal"
+        case .browser: return "globe"
+        case .ocr: return "text.viewfinder"
+        case .readSharedState: return "tray.full"
+        case .proposeSharedState: return "square.and.pencil"
+        case .delegateTasks: return "arrow.triangle.branch"
+        case .requestHumanDecision: return "hand.raised"
         }
     }
 }

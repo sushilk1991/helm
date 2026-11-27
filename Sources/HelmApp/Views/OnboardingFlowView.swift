@@ -14,9 +14,11 @@ public struct OnboardingFlowView: View {
     @State private var apiKey: String = ""
 
     @State private var selectedTemplateID: String = "feature"
-    @State private var projectName: String = "Launch MVP Workspace"
+    @State private var projectName: String = ""
+    @State private var didManuallyEditName: Bool = false
     @State private var projectGoal: String = "Research requirements, implement core features in the isolated sandbox, and verify the live app headlessly."
     @State private var workspacePath: String = ""
+    @State private var leadPersonality: AgentPersonality = .calmCommander
     @State private var selectedRoles: Set<AgentRole> = [.researcher, .coder, .browserAnalyst]
     @State private var crewSeeds: [AgentRole: AgentCharacterSeed] = [:]
     @State private var errorMessage: String?
@@ -332,6 +334,13 @@ public struct OnboardingFlowView: View {
                     badgePositive: env.codexCLIAvailable
                 )
                 providerCard(
+                    kind: .piCLI,
+                    title: "Pi CLI (PyCLI)",
+                    subtitle: "Uses your local `pi` coding agent CLI (`pi -p --mode json`) for fast multi-model workflows.",
+                    badge: env.piCLIAvailable ? "Detected on this Mac" : "CLI not detected",
+                    badgePositive: env.piCLIAvailable
+                )
+                providerCard(
                     kind: .directHTTP,
                     title: "OpenAI / OpenRouter / Custom API",
                     subtitle: "Connect any OpenAI-compatible chat completions endpoint.",
@@ -511,29 +520,38 @@ public struct OnboardingFlowView: View {
                 }
             }
 
-            // Project Brief
+            // Project Brief — Repo / Folder FIRST, auto-deriving project name
             VStack(alignment: .leading, spacing: 12) {
-                HStack(spacing: 12) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Project Name")
+                VStack(alignment: .leading, spacing: 5) {
+                    HStack {
+                        Text("Repository or Workspace Folder")
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(HelmInk.secondary)
-                        TextField("e.g., Launch MVP Workspace", text: $projectName)
-                            .textFieldStyle(.roundedBorder)
-                    }
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Workspace Folder")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(HelmInk.secondary)
-                        HStack(spacing: 6) {
-                            TextField("/path/to/workspace", text: $workspacePath)
-                                .font(.system(size: 12, design: .monospaced))
-                                .textFieldStyle(.roundedBorder)
-                            Button("Choose…") {
-                                pickFolder()
-                            }
-                            .buttonStyle(HelmSecondaryButtonStyle())
+                        Spacer()
+                        if !resolvedProjectName.isEmpty {
+                            Text("Project name: \(resolvedProjectName)")
+                                .font(.caption)
+                                .foregroundStyle(HelmAccent.primary)
                         }
+                    }
+                    HStack(spacing: 8) {
+                        TextField("/path/to/your-repo", text: $workspacePath)
+                            .font(.system(size: 12, design: .monospaced))
+                            .textFieldStyle(.roundedBorder)
+                            .onChange(of: workspacePath) { _, newPath in
+                                if !didManuallyEditName {
+                                    let derived = URL(fileURLWithPath: newPath).lastPathComponent
+                                    if !derived.isEmpty && derived != "/" {
+                                        projectName = derived
+                                    }
+                                }
+                            }
+                        Button {
+                            pickFolder()
+                        } label: {
+                            Label("Choose Repo…", systemImage: "folder")
+                        }
+                        .buttonStyle(HelmSecondaryButtonStyle())
                     }
                 }
 
@@ -544,6 +562,33 @@ public struct OnboardingFlowView: View {
                     TextField("Describe what your autonomous crew should build, research, or monitor…", text: $projectGoal, axis: .vertical)
                         .lineLimit(2...3)
                         .textFieldStyle(.roundedBorder)
+                }
+
+                HStack(spacing: 12) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Display Name (auto-filled from folder)")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(HelmInk.muted)
+                        TextField("Auto-detected from repo folder", text: $projectName)
+                            .textFieldStyle(.roundedBorder)
+                            .onChange(of: projectName) { _, newValue in
+                                let folderName = URL(fileURLWithPath: workspacePath).lastPathComponent
+                                didManuallyEditName = !newValue.isEmpty && newValue != folderName
+                            }
+                    }
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Lead Personality")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(HelmInk.muted)
+                        Picker("Lead Personality", selection: $leadPersonality) {
+                            ForEach(AgentPersonality.allCases, id: \.self) { p in
+                                Text(p.displayName).tag(p)
+                            }
+                        }
+                        .labelsHidden()
+                        .frame(width: 185)
+                    }
                 }
             }
             .padding(16)
@@ -566,7 +611,7 @@ public struct OnboardingFlowView: View {
                     crewCard(
                         role: .orchestrator,
                         title: "Compass",
-                        subtitle: "Orchestrator",
+                        subtitle: leadPersonality.displayName,
                         state: .thinking,
                         selected: true,
                         locked: true
@@ -694,6 +739,13 @@ public struct OnboardingFlowView: View {
         }
     }
 
+    private var resolvedProjectName: String {
+        let trimmed = projectName.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty { return trimmed }
+        let folder = URL(fileURLWithPath: workspacePath).lastPathComponent
+        return (folder.isEmpty || folder == "/") ? "" : folder
+    }
+
     private func pickFolder() {
         let panel = NSOpenPanel()
         panel.canChooseFiles = false
@@ -702,24 +754,26 @@ public struct OnboardingFlowView: View {
         panel.allowsMultipleSelection = false
         if panel.runModal() == .OK, let url = panel.url {
             workspacePath = url.path
+            projectName = url.lastPathComponent
+            didManuallyEditName = false
         }
     }
 
     private func launchFirstProject() {
-        let trimmedName = projectName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedName = resolvedProjectName
         let trimmedGoal = projectGoal.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedPath = workspacePath.trimmingCharacters(in: .whitespacesAndNewlines)
 
+        guard !trimmedPath.isEmpty else {
+            errorMessage = "Choose a repository or local workspace folder."
+            return
+        }
         guard !trimmedName.isEmpty else {
-            errorMessage = "Give your project a short name."
+            errorMessage = "Choose a valid folder or enter a project name."
             return
         }
         guard !trimmedGoal.isEmpty else {
             errorMessage = "Describe the goal your crew should work toward."
-            return
-        }
-        guard !trimmedPath.isEmpty else {
-            errorMessage = "Choose a local workspace folder."
             return
         }
 
@@ -737,6 +791,7 @@ public struct OnboardingFlowView: View {
                     goal: trimmedGoal,
                     workspaceRoot: url,
                     backend: selectedBackend,
+                    leadPersonality: leadPersonality,
                     starterRoles: orderedRoles
                 )
                 withAnimation(effectiveReduceMotion ? HelmMotion.exit : HelmMotion.state) {

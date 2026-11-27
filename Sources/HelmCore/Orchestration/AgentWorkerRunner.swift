@@ -115,8 +115,12 @@ public struct AgentWorkerRunner: Sendable {
             charBudget: project.budgetPolicy.memoryCharBudget
         )
 
+        let personalityLine = agent.personalityNotes.isEmpty
+            ? "\(agent.personality.displayName): \(agent.personality.promptDirective)"
+            : "\(agent.personality.displayName): \(agent.personality.promptDirective) Custom traits: \(agent.personalityNotes)"
+
         let rawChannels: [PromptChannel: String] = [
-            .identity: "Agent: \(agent.name)\nRole: \(agent.role.rawValue)\nGoal: \(agent.goal)\nCapabilities: \(agent.capabilities.map(\.rawValue).sorted().joined(separator: ", "))",
+            .identity: "Agent: \(agent.name)\nRole: \(agent.role.rawValue)\nPersonality: \(personalityLine)\nGoal: \(agent.goal)\nCapabilities: \(agent.capabilities.map(\.rawValue).sorted().joined(separator: ", "))",
             .projectContext: "Project: \(project.name)\nGoal: \(project.goal)\nWorkspace: \(project.workspaceRoot.path)",
             .sharedMemory: rankedMemory?.packedText ?? "",
             .continuity: "Task: \(task.title)\nAttempt: \(task.attemptCount + 1)/\(task.maxAttempts)\nInstructions: \(task.instructions)",
@@ -137,7 +141,7 @@ public struct AgentWorkerRunner: Sendable {
             }
         }
 
-        let systemPrompt = "Role: \(agent.role.rawValue)\nAgentGoal: \(agent.goal)\nOperate inside workspace: \(project.workspaceRoot.path)"
+        let systemPrompt = "Role: \(agent.role.rawValue)\nPersonality: \(personalityLine)\nAgentGoal: \(agent.goal)\nOperate inside workspace: \(project.workspaceRoot.path)"
         let userPrompt = "TASK_EXECUTION\nTaskID: \(task.id.uuidString)\n" + contextParts.joined(separator: "\n\n")
 
         let tools: [LLMToolSchema] = [

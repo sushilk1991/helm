@@ -4,6 +4,26 @@ import SwiftUI
 public struct DetailInspectorView: View {
     @Bindable var store: HelmWorkspaceStore
 
+    @State private var draftAgentID: UUID?
+    @State private var draftGoal: String = ""
+    @State private var draftPersonality: AgentPersonality = .calmCommander
+    @State private var draftPersonalityNotes: String = ""
+    @State private var draftBackend: LLMBackendKind = .claudeCLI
+    @State private var draftCapabilities: Set<AgentCapability> = []
+    @State private var isSaving: Bool = false
+    @State private var justSaved: Bool = false
+    @State private var saveError: String?
+
+    private let orderedCapabilities: [AgentCapability] = [
+        .codeExec,
+        .browser,
+        .ocr,
+        .readSharedState,
+        .proposeSharedState,
+        .delegateTasks,
+        .requestHumanDecision,
+    ]
+
     public init(store: HelmWorkspaceStore) {
         self.store = store
     }
@@ -40,7 +60,7 @@ public struct DetailInspectorView: View {
             Divider().overlay(HelmSurface.line)
 
             ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
+                VStack(alignment: .leading, spacing: 16) {
                     switch store.inspectorTab {
                     case .agent:
                         agentTabContent
@@ -53,36 +73,81 @@ public struct DetailInspectorView: View {
                 .padding(16)
             }
         }
-        .frame(width: 320)
+        .frame(width: 344)
         .background(HelmSurface.sidebar)
         .overlay(alignment: .leading) {
             Rectangle()
                 .fill(HelmSurface.line)
                 .frame(width: 1)
         }
+        .onAppear {
+            syncDraftIfNeeded(force: true)
+        }
+        .onChange(of: store.selectedAgent?.id) { _, _ in
+            syncDraftIfNeeded(force: true)
+        }
     }
 
-    // MARK: - Tab 1: Selected Agent Showcase
+    private func syncDraftIfNeeded(force: Bool) {
+        guard let agent = store.selectedAgent else {
+            draftAgentID = nil
+            return
+        }
+        if force || draftAgentID != agent.id {
+            draftAgentID = agent.id
+            draftGoal = agent.goal
+            draftPersonality = agent.personality
+            draftPersonalityNotes = agent.personalityNotes
+            draftBackend = agent.backend
+            draftCapabilities = agent.capabilities
+            saveError = nil
+            justSaved = false
+        }
+    }
+
+    private func hasUnsavedChanges(for agent: AgentProfile) -> Bool {
+        draftAgentID == agent.id && (
+            draftGoal.trimmingCharacters(in: .whitespacesAndNewlines) != agent.goal ||
+            draftPersonality != agent.personality ||
+            draftPersonalityNotes.trimmingCharacters(in: .whitespacesAndNewlines) != agent.personalityNotes ||
+            draftBackend != agent.backend ||
+            draftCapabilities != agent.capabilities
+        )
+    }
+
+    // MARK: - Tab 1: Selected Agent & Lead Configuration
 
     @ViewBuilder
     private var agentTabContent: some View {
         if let agent = store.selectedAgent {
+            let dirty = hasUnsavedChanges(for: agent)
+
             VStack(spacing: 14) {
                 // Hero living character stage
-                VStack(spacing: 12) {
+                VStack(spacing: 10) {
                     AgentCharacterCanvas(
                         seed: agent.characterSeed,
                         state: agent.activityState,
-                        size: 76,
+                        size: 74,
                         showStageBacking: true,
                         interactive: true
                     )
 
-                    VStack(spacing: 4) {
-                        Text(agent.name)
-                            .font(.title3.weight(.bold))
-                            .foregroundStyle(HelmInk.primary)
-                        Text("\(agent.role.displayName) · \(agent.backend.displayName)")
+                    VStack(spacing: 3) {
+                        HStack(spacing: 6) {
+                            Text(agent.name)
+                                .font(.title3.weight(.bold))
+                                .foregroundStyle(HelmInk.primary)
+                            if agent.role == .orchestrator {
+                                Text("Lead")
+                                    .font(.system(size: 10, weight: .semibold))
+                                    .foregroundStyle(HelmAccent.brass)
+                                    .padding(.horizontal, 7)
+                                    .padding(.vertical, 2)
+                                    .background(HelmAccent.brassSoft, in: Capsule())
+                            }
+                        }
+                        Text("\(agent.role.displayName) · \(draftBackend.displayName)")
                             .font(.caption)
                             .foregroundStyle(HelmInk.secondary)
                     }
@@ -90,36 +155,121 @@ public struct DetailInspectorView: View {
                     AgentStatusBadge(state: agent.activityState)
                 }
                 .frame(maxWidth: .infinity)
-                .padding(.vertical, 18)
+                .padding(.vertical, 16)
                 .padding(.horizontal, 14)
                 .helmCard(cornerRadius: HelmRadius.card)
 
-                // Mission & Capabilities
+                // Personality & AI Provider Card (works for Lead AND every specialist!)
                 VStack(alignment: .leading, spacing: 12) {
-                    Text("Mission")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(HelmInk.secondary)
+                    HStack {
+                        Label("Personality", systemImage: draftPersonality.symbolName)
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(HelmInk.primary)
+                        Spacer()
+                        Picker("Personality", selection: $draftPersonality) {
+                            ForEach(AgentPersonality.allCases, id: \.self) { p in
+                                Text(p.displayName).tag(p)
+                            }
+                        }
+                        .labelsHidden()
+                        .frame(width: 170)
+                    }
 
-                    Text(agent.goal)
-                        .font(.callout)
-                        .foregroundStyle(HelmInk.primary)
+                    Text(draftPersonality.tagline)
+                        .font(.caption)
+                        .foregroundStyle(HelmInk.secondary)
                         .fixedSize(horizontal: false, vertical: true)
+
+                    TextField("Optional style note (e.g., concise, strict tests…)", text: $draftPersonalityNotes)
+                        .font(.caption)
+                        .textFieldStyle(.roundedBorder)
 
                     Divider().overlay(HelmSurface.line)
 
-                    Text("Permissions")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(HelmInk.secondary)
+                    HStack {
+                        Label("AI Engine", systemImage: "cpu")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(HelmInk.primary)
+                        Spacer()
+                        Picker("AI Engine", selection: $draftBackend) {
+                            ForEach(LLMBackendKind.allCases, id: \.self) { kind in
+                                Text(kind.displayName).tag(kind)
+                            }
+                        }
+                        .labelsHidden()
+                        .frame(width: 150)
+                    }
 
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 95), spacing: 6)], alignment: .leading, spacing: 6) {
-                        ForEach(Array(agent.capabilities).sorted(by: { $0.rawValue < $1.rawValue }), id: \.rawValue) { cap in
-                            MetadataTag(cap.displayName)
+                    Divider().overlay(HelmSurface.line)
+
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text("Mission")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(HelmInk.primary)
+                        TextField("Agent responsibility…", text: $draftGoal, axis: .vertical)
+                            .font(.caption)
+                            .lineLimit(2...4)
+                            .textFieldStyle(.roundedBorder)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(14)
+                .helmCard(cornerRadius: HelmRadius.panel)
+
+                // Clear Plain-English Interactive Permissions
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack {
+                        Text("Permissions")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(HelmInk.primary)
+                        Spacer()
+                        Text("\(draftCapabilities.count) enabled")
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(HelmInk.muted)
+                    }
+
+                    VStack(spacing: 8) {
+                        ForEach(orderedCapabilities, id: \.self) { cap in
+                            permissionRow(cap)
                         }
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(14)
                 .helmCard(cornerRadius: HelmRadius.panel)
+
+                // Save bar when edited
+                if dirty || justSaved || saveError != nil {
+                    VStack(alignment: .leading, spacing: 6) {
+                        if let saveError {
+                            Text(saveError)
+                                .font(.caption)
+                                .foregroundStyle(HelmSemantic.critical)
+                        }
+                        HStack(spacing: 8) {
+                            if dirty {
+                                Button("Reset") {
+                                    syncDraftIfNeeded(force: true)
+                                }
+                                .buttonStyle(HelmSecondaryButtonStyle())
+
+                                Button {
+                                    saveAgentChanges(agent)
+                                } label: {
+                                    Text(isSaving ? "Saving…" : "Save Changes")
+                                        .frame(maxWidth: .infinity)
+                                }
+                                .buttonStyle(HelmPrimaryButtonStyle())
+                                .disabled(isSaving)
+                            } else if justSaved {
+                                Label("Saved to workspace", systemImage: "checkmark.circle.fill")
+                                    .font(.caption.weight(.medium))
+                                    .foregroundStyle(HelmSemantic.steady)
+                                Spacer()
+                            }
+                        }
+                    }
+                }
 
                 // Private Memory
                 if !store.selectedAgentPrivateMemory.isEmpty {
@@ -151,7 +301,7 @@ public struct DetailInspectorView: View {
                 Text("Select an agent")
                     .font(.callout.weight(.semibold))
                     .foregroundStyle(HelmInk.primary)
-                Text("Click any bot card on the workspace stage to inspect its mission, permissions, and private notes.")
+                Text("Click any bot card on the workspace stage to edit its personality, AI engine, mission, and permissions.")
                     .font(.caption)
                     .foregroundStyle(HelmInk.secondary)
                     .multilineTextAlignment(.center)
@@ -161,7 +311,68 @@ public struct DetailInspectorView: View {
         }
     }
 
-    // MARK: - Tab 2: Live Sandbox & Headless Browser Output (Zero Debug Buttons)
+    private func permissionRow(_ cap: AgentCapability) -> some View {
+        let isOn = draftCapabilities.contains(cap)
+
+        return HStack(alignment: .top, spacing: 10) {
+            Image(systemName: cap.symbolName)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(isOn ? HelmAccent.primary : HelmInk.muted)
+                .frame(width: 24, height: 24)
+                .background((isOn ? HelmAccent.primarySoft : HelmSurface.well), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text(cap.displayName)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(isOn ? HelmInk.primary : HelmInk.secondary)
+                Text(cap.humanDescription)
+                    .font(.system(size: 10))
+                    .foregroundStyle(HelmInk.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Spacer(minLength: 4)
+
+            Toggle("", isOn: Binding(
+                get: { draftCapabilities.contains(cap) },
+                set: { enabled in
+                    if enabled {
+                        draftCapabilities.insert(cap)
+                    } else {
+                        draftCapabilities.remove(cap)
+                    }
+                    justSaved = false
+                }
+            ))
+            .toggleStyle(.switch)
+            .controlSize(.mini)
+            .labelsHidden()
+        }
+    }
+
+    private func saveAgentChanges(_ agent: AgentProfile) {
+        isSaving = true
+        saveError = nil
+        Task {
+            do {
+                try await store.updateAgent(
+                    agentID: agent.id,
+                    goal: draftGoal,
+                    backend: draftBackend,
+                    personality: draftPersonality,
+                    personalityNotes: draftPersonalityNotes,
+                    capabilities: draftCapabilities
+                )
+                isSaving = false
+                justSaved = true
+            } catch {
+                saveError = error.localizedDescription
+                isSaving = false
+            }
+        }
+    }
+
+    // MARK: - Tab 2: Live Sandbox & Headless Browser Output
 
     private var activityTabContent: some View {
         let exec = store.selectedLatestExecutionResult
@@ -169,7 +380,6 @@ public struct DetailInspectorView: View {
         let artifacts = Array(store.selectedProjectArtifacts.suffix(5).reversed())
 
         return VStack(alignment: .leading, spacing: 16) {
-            // Isolated Execution
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
                     Label("Sandbox Output", systemImage: "terminal")
@@ -214,7 +424,6 @@ public struct DetailInspectorView: View {
                 )
             }
 
-            // Headless Browser + Vision OCR
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
                     Label("Browser & Vision OCR", systemImage: "globe")
@@ -352,7 +561,7 @@ public struct DetailInspectorView: View {
         case .projectHeld: return "Needs Decision"
         case .projectCompleted: return "Project Completed"
         case .agentAdded: return "Agent Joined"
-        case .agentStateChanged: return "Status Update"
+        case .agentStateChanged: return "Agent Updated"
         case .taskCreated: return "Task Created"
         case .taskDelegated: return "Task Delegated"
         case .taskCompleted: return "Task Completed"

@@ -104,7 +104,9 @@ public final class HelmControlPlane: Sendable {
         role: AgentRole,
         goal: String,
         backend: LLMBackendKind,
-        capabilities: Set<AgentCapability> = [.readSharedState, .proposeSharedState, .requestHumanDecision]
+        capabilities: Set<AgentCapability> = [.readSharedState, .proposeSharedState, .requestHumanDecision],
+        personality: AgentPersonality? = nil,
+        personalityNotes: String = ""
     ) async throws -> AgentProfile {
         guard try await database.fetchProject(id: projectID) != nil else {
             throw ControlPlaneError.projectNotFound(projectID)
@@ -128,6 +130,8 @@ public final class HelmControlPlane: Sendable {
             name: trimmedName,
             role: role,
             goal: trimmedGoal,
+            personality: personality ?? AgentPersonality.defaultForRole(role),
+            personalityNotes: personalityNotes.trimmingCharacters(in: .whitespacesAndNewlines),
             capabilities: capabilities,
             backend: backend
         )
@@ -136,10 +140,63 @@ public final class HelmControlPlane: Sendable {
             projectID: projectID,
             agentID: agent.id,
             kind: .agentAdded,
-            summary: "Added agent '\(agent.name)' (\(agent.role.rawValue), backend: \(agent.backend.rawValue))",
+            summary: "Added agent '\(agent.name)' (\(agent.role.rawValue), \(agent.personality.displayName), backend: \(agent.backend.rawValue))",
             trustLevel: .humanAuthoritative
         ))
         try await refreshSnapshots(projectID: projectID)
+        return agent
+    }
+
+    public func updateAgent(
+        agentID: UUID,
+        name: String? = nil,
+        goal: String? = nil,
+        backend: LLMBackendKind? = nil,
+        personality: AgentPersonality? = nil,
+        personalityNotes: String? = nil,
+        capabilities: Set<AgentCapability>? = nil,
+        modelOverride: String?? = nil
+    ) async throws -> AgentProfile {
+        guard var agent = try await database.fetchAgent(id: agentID) else {
+            throw HelmDatabaseError.notFound("Agent \(agentID.uuidString)")
+        }
+
+        if let name {
+            let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else {
+                throw ControlPlaneError.invalidInput("Agent name cannot be empty.")
+            }
+            let siblings = try await database.listAgents(projectID: agent.projectID)
+            if siblings.contains(where: { $0.id != agent.id && $0.name.caseInsensitiveCompare(trimmed) == .orderedSame }) {
+                throw ControlPlaneError.duplicateAgentName(trimmed)
+            }
+            agent.name = trimmed
+        }
+        if let goal {
+            let trimmed = goal.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else {
+                throw ControlPlaneError.invalidInput("Agent goal cannot be empty.")
+            }
+            agent.goal = trimmed
+        }
+        if let backend { agent.backend = backend }
+        if let personality { agent.personality = personality }
+        if let personalityNotes {
+            agent.personalityNotes = personalityNotes.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        if let capabilities { agent.capabilities = capabilities }
+        if let modelOverride { agent.modelOverride = modelOverride }
+        agent.updatedAt = Date()
+
+        try await database.updateAgent(agent)
+        try await database.appendEvent(RunEvent(
+            projectID: agent.projectID,
+            agentID: agent.id,
+            kind: .agentStateChanged,
+            summary: "Updated \(agent.name) (\(agent.personality.displayName), \(agent.backend.rawValue))",
+            trustLevel: .humanAuthoritative
+        ))
+        try await refreshSnapshots(projectID: agent.projectID)
         return agent
     }
 

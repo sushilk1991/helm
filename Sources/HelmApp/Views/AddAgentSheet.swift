@@ -76,6 +76,8 @@ public struct AddAgentSheet: View {
     @State private var name: String = ""
     @State private var role: AgentRole = .researcher
     @State private var goal: String = ""
+    @State private var personality: AgentPersonality = .methodicalArchitect
+    @State private var personalityNotes: String = ""
     @State private var lastAutoName: String = ""
     @State private var lastAutoGoal: String = ""
     @State private var backend: LLMBackendKind = .claudeCLI
@@ -85,6 +87,9 @@ public struct AddAgentSheet: View {
     @State private var isSubmitting: Bool = false
 
     private let selectableRoles: [AgentRole] = [.researcher, .coder, .browserAnalyst, .qaVerifier, .specialist]
+    private let orderedCapabilities: [AgentCapability] = [
+        .codeExec, .browser, .ocr, .readSharedState, .proposeSharedState, .delegateTasks, .requestHumanDecision,
+    ]
 
     public init(store: HelmWorkspaceStore, projectID: UUID) {
         self.store = store
@@ -102,139 +107,193 @@ public struct AddAgentSheet: View {
     }
 
     public var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            // Hero Live Bot Character Preview
-            HStack(spacing: 16) {
-                AgentCharacterCanvas(
-                    seed: previewSeed,
-                    state: previewState,
-                    size: 68,
-                    showStageBacking: true,
-                    interactive: true
-                )
-
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Deploy Specialized Agent")
-                        .font(.title3.weight(.bold))
-                        .foregroundStyle(HelmInk.primary)
-                    Text("Every agent gets a unique animated dot-matrix character derived from its identity.")
-                        .font(.caption)
-                        .foregroundStyle(HelmInk.secondary)
-                    Button {
-                        withAnimation(HelmMotion.bouncy) {
-                            previewSeed = AgentCharacterSeed(agentID: UUID(), isOrchestrator: false)
-                        }
-                    } label: {
-                        Label("Preview another bot", systemImage: "dice")
-                            .font(.caption.weight(.medium))
-                    }
-                    .buttonStyle(.borderless)
-                    .foregroundStyle(HelmAccent.primary)
-                    .padding(.top, 2)
-                }
-                Spacer(minLength: 0)
-            }
-            .padding(14)
-            .helmCard(cornerRadius: HelmRadius.card)
-
-            VStack(alignment: .leading, spacing: 14) {
-                HStack(spacing: 14) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Role")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(HelmInk.secondary)
-                        Picker("Role", selection: $role) {
-                            ForEach(selectableRoles, id: \.self) { r in
-                                Text(r.displayName).tag(r)
-                            }
-                        }
-                        .labelsHidden()
-                        .onChange(of: role) { _, newRole in
-                            applyPreset(for: newRole)
-                        }
-                    }
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                // Hero Live Bot Character Preview
+                HStack(spacing: 16) {
+                    AgentCharacterCanvas(
+                        seed: previewSeed,
+                        state: previewState,
+                        size: 68,
+                        showStageBacking: true,
+                        interactive: true
+                    )
 
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("AI Provider")
-                            .font(.caption.weight(.semibold))
+                        Text("Deploy Specialized Agent")
+                            .font(.title3.weight(.bold))
+                            .foregroundStyle(HelmInk.primary)
+                        Text("Assign a role, personality, AI engine, and clear permissions.")
+                            .font(.caption)
                             .foregroundStyle(HelmInk.secondary)
-                        Picker("Backend", selection: $backend) {
-                            ForEach(LLMBackendKind.allCases, id: \.self) { kind in
-                                Text(kind.displayName).tag(kind)
+                        Button {
+                            withAnimation(HelmMotion.bouncy) {
+                                previewSeed = AgentCharacterSeed(agentID: UUID(), isOrchestrator: false)
                             }
+                        } label: {
+                            Label("Preview another bot", systemImage: "dice")
+                                .font(.caption.weight(.medium))
                         }
-                        .labelsHidden()
+                        .buttonStyle(.borderless)
+                        .foregroundStyle(HelmAccent.primary)
+                        .padding(.top, 2)
                     }
+                    Spacer(minLength: 0)
                 }
+                .padding(14)
+                .helmCard(cornerRadius: HelmRadius.card)
 
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Agent Name")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(HelmInk.secondary)
-                    TextField("e.g., Chart Researcher", text: $name)
-                        .textFieldStyle(.roundedBorder)
-                }
-
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Responsibility")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(HelmInk.secondary)
-                    TextField("Describe this agent's specific responsibility…", text: $goal, axis: .vertical)
-                        .lineLimit(2...4)
-                        .textFieldStyle(.roundedBorder)
-                }
-
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Capabilities")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(HelmInk.secondary)
-                    LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], alignment: .leading, spacing: 6) {
-                        ForEach(AgentCapability.allCases, id: \.self) { cap in
-                            Toggle(cap.displayName, isOn: Binding(
-                                get: { capabilities.contains(cap) },
-                                set: { enabled in
-                                    if enabled {
-                                        capabilities.insert(cap)
-                                    } else {
-                                        capabilities.remove(cap)
-                                    }
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(spacing: 12) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Role")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(HelmInk.secondary)
+                            Picker("Role", selection: $role) {
+                                ForEach(selectableRoles, id: \.self) { r in
+                                    Text(r.displayName).tag(r)
                                 }
-                            ))
-                            .toggleStyle(.checkbox)
-                            .font(.callout)
+                            }
+                            .labelsHidden()
+                            .onChange(of: role) { _, newRole in
+                                applyPreset(for: newRole)
+                                personality = AgentPersonality.defaultForRole(newRole)
+                            }
+                        }
+
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Personality")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(HelmInk.secondary)
+                            Picker("Personality", selection: $personality) {
+                                ForEach(AgentPersonality.allCases, id: \.self) { p in
+                                    Text(p.displayName).tag(p)
+                                }
+                            }
+                            .labelsHidden()
+                        }
+
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("AI Provider")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(HelmInk.secondary)
+                            Picker("Backend", selection: $backend) {
+                                ForEach(LLMBackendKind.allCases, id: \.self) { kind in
+                                    Text(kind.displayName).tag(kind)
+                                }
+                            }
+                            .labelsHidden()
                         }
                     }
+
+                    Text(personality.tagline)
+                        .font(.caption)
+                        .foregroundStyle(HelmInk.muted)
+
+                    HStack(spacing: 12) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Agent Name")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(HelmInk.secondary)
+                            TextField("e.g., Chart Researcher", text: $name)
+                                .textFieldStyle(.roundedBorder)
+                        }
+
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Custom Style Note (optional)")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(HelmInk.secondary)
+                            TextField("e.g., Blunt, test-first, Swift 6", text: $personalityNotes)
+                                .textFieldStyle(.roundedBorder)
+                        }
+                    }
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Responsibility")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(HelmInk.secondary)
+                        TextField("Describe this agent's specific responsibility…", text: $goal, axis: .vertical)
+                            .lineLimit(2...3)
+                            .textFieldStyle(.roundedBorder)
+                    }
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Permissions")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(HelmInk.secondary)
+
+                        VStack(spacing: 8) {
+                            ForEach(orderedCapabilities, id: \.self) { cap in
+                                let isOn = capabilities.contains(cap)
+                                HStack(alignment: .top, spacing: 10) {
+                                    Image(systemName: cap.symbolName)
+                                        .font(.system(size: 12, weight: .semibold))
+                                        .foregroundStyle(isOn ? HelmAccent.primary : HelmInk.muted)
+                                        .frame(width: 24, height: 24)
+                                        .background((isOn ? HelmAccent.primarySoft : HelmSurface.well), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+
+                                    VStack(alignment: .leading, spacing: 1) {
+                                        Text(cap.displayName)
+                                            .font(.caption.weight(.semibold))
+                                            .foregroundStyle(isOn ? HelmInk.primary : HelmInk.secondary)
+                                        Text(cap.humanDescription)
+                                            .font(.system(size: 10))
+                                            .foregroundStyle(HelmInk.muted)
+                                    }
+
+                                    Spacer()
+
+                                    Toggle("", isOn: Binding(
+                                        get: { capabilities.contains(cap) },
+                                        set: { enabled in
+                                            if enabled {
+                                                capabilities.insert(cap)
+                                            } else {
+                                                capabilities.remove(cap)
+                                            }
+                                        }
+                                    ))
+                                    .toggleStyle(.switch)
+                                    .controlSize(.mini)
+                                    .labelsHidden()
+                                }
+                            }
+                        }
+                        .padding(12)
+                        .helmCard(cornerRadius: HelmRadius.panel)
+                    }
+                }
+
+                if let validationError {
+                    Text(validationError)
+                        .font(.callout)
+                        .foregroundStyle(HelmSemantic.critical)
+                }
+
+                HStack {
+                    Spacer()
+                    Button("Cancel") {
+                        dismiss()
+                    }
+                    .buttonStyle(HelmSecondaryButtonStyle())
+                    .keyboardShortcut(.cancelAction)
+
+                    Button("Deploy Agent") {
+                        submit()
+                    }
+                    .buttonStyle(HelmPrimaryButtonStyle())
+                    .disabled(isSubmitting)
+                    .keyboardShortcut(.defaultAction)
                 }
             }
-
-            if let validationError {
-                Text(validationError)
-                    .font(.callout)
-                    .foregroundStyle(HelmSemantic.critical)
-            }
-
-            HStack {
-                Spacer()
-                Button("Cancel") {
-                    dismiss()
-                }
-                .buttonStyle(HelmSecondaryButtonStyle())
-                .keyboardShortcut(.cancelAction)
-
-                Button("Deploy Agent") {
-                    submit()
-                }
-                .buttonStyle(HelmPrimaryButtonStyle())
-                .disabled(isSubmitting)
-                .keyboardShortcut(.defaultAction)
-            }
+            .padding(22)
         }
-        .padding(22)
-        .frame(width: 520)
+        .frame(width: 580, height: 610)
         .background(HelmSurface.canvas)
         .onAppear {
             backend = store.defaultBackend
             applyPreset(for: role)
+            personality = AgentPersonality.defaultForRole(role)
         }
     }
 
@@ -271,7 +330,9 @@ public struct AddAgentSheet: View {
                     role: role,
                     goal: trimmedGoal,
                     backend: backend,
-                    capabilities: capabilities
+                    capabilities: capabilities,
+                    personality: personality,
+                    personalityNotes: personalityNotes
                 )
                 dismiss()
             } catch {

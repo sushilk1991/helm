@@ -1,7 +1,12 @@
 import Foundation
 
 public enum HelmDatabaseSchema {
-    public static let currentVersion: Int32 = 1
+    public static let currentVersion: Int32 = 2
+
+    public static let migrationV2SQL: String = """
+    ALTER TABLE agents ADD COLUMN personality TEXT NOT NULL DEFAULT 'pragmaticBuilder';
+    ALTER TABLE agents ADD COLUMN personality_notes TEXT NOT NULL DEFAULT '';
+    """
 
     public static let migrationV1SQL: String = """
     CREATE TABLE IF NOT EXISTS projects (

@@ -9,6 +9,7 @@ public struct LocalEnvironmentStatus: Sendable, Equatable {
     public let chromeAvailable: Bool
     public let claudeCLIAvailable: Bool
     public let codexCLIAvailable: Bool
+    public let piCLIAvailable: Bool
     public let foundationModelsSupported: Bool
 
     public static func detect(environment: [String: String] = ProcessInfo.processInfo.environment) -> LocalEnvironmentStatus {
@@ -17,6 +18,7 @@ public struct LocalEnvironmentStatus: Sendable, Equatable {
         let chrome = fm.isExecutableFile(atPath: chromePath)
         let claude = isToolOnPath("claude", environment: environment)
         let codex = isToolOnPath("codex", environment: environment)
+        let pi = isToolOnPath("pi", environment: environment) || isToolOnPath("pycli", environment: environment)
         let supportsFM: Bool
         if #available(macOS 26.0, *) {
             supportsFM = true
@@ -28,6 +30,7 @@ public struct LocalEnvironmentStatus: Sendable, Equatable {
             chromeAvailable: chrome,
             claudeCLIAvailable: claude,
             codexCLIAvailable: codex,
+            piCLIAvailable: pi,
             foundationModelsSupported: supportsFM
         )
     }
@@ -35,6 +38,7 @@ public struct LocalEnvironmentStatus: Sendable, Equatable {
     public var recommendedBackend: LLMBackendKind {
         if claudeCLIAvailable { return .claudeCLI }
         if codexCLIAvailable { return .codexCLI }
+        if piCLIAvailable { return .piCLI }
         if foundationModelsSupported { return .foundationModels }
         return .mock
     }
@@ -46,6 +50,7 @@ public struct LocalEnvironmentStatus: Sendable, Equatable {
             "/usr/local/bin",
             "\(NSHomeDirectory())/.local/bin",
             "\(NSHomeDirectory())/.npm-global/bin",
+            "\(NSHomeDirectory())/.bun/bin",
         ] + (environment["PATH"]?.split(separator: ":").map(String.init) ?? [])
         for dir in searchDirs {
             let full = (dir as NSString).appendingPathComponent(name)
@@ -92,6 +97,7 @@ public final class HelmWorkspaceStore {
         chromeAvailable: false,
         claudeCLIAvailable: false,
         codexCLIAvailable: false,
+        piCLIAvailable: false,
         foundationModelsSupported: false
     )
 
@@ -484,17 +490,22 @@ public final class HelmWorkspaceStore {
         goal: String,
         workspaceRoot: URL,
         backend: LLMBackendKind? = nil,
+        leadPersonality: AgentPersonality = .calmCommander,
         starterRoles: [AgentRole] = []
     ) async throws {
         let chosenBackend = backend ?? defaultBackend
-        let project = try await controlPlane.createProject(name: name, goal: goal, workspaceRoot: workspaceRoot)
+        let resolvedName = name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? workspaceRoot.lastPathComponent
+            : name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let project = try await controlPlane.createProject(name: resolvedName, goal: goal, workspaceRoot: workspaceRoot)
         _ = try await controlPlane.addAgent(
             projectID: project.id,
             name: "Compass",
             role: .orchestrator,
             goal: "Coordinate specialists, maintain shared memory, and alert you only when human judgment is needed.",
             backend: chosenBackend,
-            capabilities: [.readSharedState, .proposeSharedState, .delegateTasks, .requestHumanDecision]
+            capabilities: [.readSharedState, .proposeSharedState, .delegateTasks, .requestHumanDecision],
+            personality: leadPersonality
         )
         for role in starterRoles where role != .orchestrator {
             let preset = AgentRolePreset.preset(for: role)
@@ -504,7 +515,8 @@ public final class HelmWorkspaceStore {
                 role: role,
                 goal: preset.goal,
                 backend: chosenBackend,
-                capabilities: preset.capabilities
+                capabilities: preset.capabilities,
+                personality: AgentPersonality.defaultForRole(role)
             )
         }
         await reloadAll()
@@ -517,7 +529,9 @@ public final class HelmWorkspaceStore {
         role: AgentRole,
         goal: String,
         backend: LLMBackendKind,
-        capabilities: Set<AgentCapability>
+        capabilities: Set<AgentCapability>,
+        personality: AgentPersonality? = nil,
+        personalityNotes: String = ""
     ) async throws {
         let agent = try await controlPlane.addAgent(
             projectID: projectID,
@@ -525,10 +539,34 @@ public final class HelmWorkspaceStore {
             role: role,
             goal: goal,
             backend: backend,
-            capabilities: capabilities
+            capabilities: capabilities,
+            personality: personality ?? AgentPersonality.defaultForRole(role),
+            personalityNotes: personalityNotes
         )
         await refreshProjectDetails(projectID: projectID, notifyExceptions: false)
         selectedAgentID = agent.id
+    }
+
+    public func updateAgent(
+        agentID: UUID,
+        name: String? = nil,
+        goal: String? = nil,
+        backend: LLMBackendKind? = nil,
+        personality: AgentPersonality? = nil,
+        personalityNotes: String? = nil,
+        capabilities: Set<AgentCapability>? = nil
+    ) async throws {
+        let updated = try await controlPlane.updateAgent(
+            agentID: agentID,
+            name: name,
+            goal: goal,
+            backend: backend,
+            personality: personality,
+            personalityNotes: personalityNotes,
+            capabilities: capabilities
+        )
+        await refreshProjectDetails(projectID: updated.projectID, notifyExceptions: false)
+        selectedAgentID = updated.id
     }
 
     public func startSelectedProject() async {

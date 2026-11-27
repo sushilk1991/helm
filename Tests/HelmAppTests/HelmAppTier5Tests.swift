@@ -345,4 +345,70 @@ struct HelmAppTier5Tests {
         #expect(info.sha256URL?.lastPathComponent == "Helm-0.2.0-arm64.dmg.sha256")
         #expect(info.notes == "Improved autonomous workflows.")
     }
+
+    @Test("Agent personality, PiCLI backend, auto repo naming, and updateAgent persist durably")
+    @MainActor
+    func agentPersonalityAndPiCLIEndToEnd() async throws {
+        let db = try HelmDatabase(path: ":memory:")
+        let ws = FileManager.default.temporaryDirectory.appendingPathComponent("awesome-repo-\(UUID().uuidString.prefix(5))")
+        try FileManager.default.createDirectory(at: ws, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: ws) }
+
+        let ocr = VisionOCRService()
+        let router = ExecutionRouter()
+        let browser = BrowseReadActTool(ocrService: ocr)
+        let cp = HelmControlPlane(
+            database: db,
+            providerRegistry: .makeDefault(),
+            sandboxExecutor: router,
+            browserService: browser
+        )
+        let notif = NotificationCoordinator(
+            arguments: ["--headless"],
+            environment: ["HELM_DISABLE_NOTIFICATIONS": "1", "HELM_NO_ACTIVATE": "1"]
+        )
+        let store = HelmWorkspaceStore(
+            controlPlane: cp,
+            ocrService: ocr,
+            sandboxExecutor: router,
+            browserService: browser,
+            notificationCoordinator: notif,
+            forcedReduceMotion: true
+        )
+
+        // Empty project name automatically derives repo folder name
+        try await store.createProject(name: "", goal: "Ship features", workspaceRoot: ws, leadPersonality: .methodicalArchitect)
+        let project = try #require(store.selectedProject)
+        #expect(project.name == ws.lastPathComponent)
+
+        let lead = try #require(store.selectedProjectAgents.first(where: { $0.role == .orchestrator }))
+        #expect(lead.personality == .methodicalArchitect)
+
+        // Update Lead personality, notes, backend (Pi CLI), and permissions
+        try await store.updateAgent(
+            agentID: lead.id,
+            backend: .piCLI,
+            personality: .adversarialReviewer,
+            personalityNotes: "Be concise and verify every diff.",
+            capabilities: [.readSharedState, .proposeSharedState, .delegateTasks, .codeExec]
+        )
+
+        let refreshedLead = try #require(store.selectedProjectAgents.first(where: { $0.id == lead.id }))
+        #expect(refreshedLead.personality == .adversarialReviewer)
+        #expect(refreshedLead.personalityNotes == "Be concise and verify every diff.")
+        #expect(refreshedLead.backend == .piCLI)
+        #expect(refreshedLead.capabilities.contains(.codeExec))
+
+        // Verify PiCLIProvider parses Pi JSONL stream and plain text cleanly
+        let piJSONL = """
+        {"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"Hello "}}
+        {"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"PI_OK"}],"usage":{"input":12,"output":4}}}
+        """
+        let parsed = try PiCLIProvider.parsePiOutput(piJSONL, hasTools: false)
+        #expect(parsed.text == "PI_OK")
+        #expect(parsed.usage?.inputTokens == 12)
+        #expect(LLMBackendKind.parse("pycli") == .piCLI)
+        #expect(LLMBackendKind.parse("pi") == .piCLI)
+        store.stopPollingForTermination()
+    }
 }

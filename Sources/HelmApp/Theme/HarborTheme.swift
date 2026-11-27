@@ -269,6 +269,7 @@ public extension LLMBackendKind {
         case .mock: return "Demo Mode"
         case .claudeCLI: return "Claude"
         case .codexCLI: return "Codex"
+        case .agyCLI: return "Antigravity (agy)"
         case .piCLI: return "Pi CLI"
         case .directHTTP: return "OpenAI / API"
         case .foundationModels: return "Apple On-Device"

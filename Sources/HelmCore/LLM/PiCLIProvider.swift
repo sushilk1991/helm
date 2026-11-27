@@ -45,16 +45,18 @@ public struct PiCLIProvider: LLMProvider, Sendable {
         \(request.userPrompt)
         """
 
+        let effectivePath = ProcessInfo.processInfo.environment["HELM_PI_PATH"]
+            .flatMap { $0.isEmpty ? nil : $0 } ?? executablePath
         var args: [String] = []
         let execURL: URL
-        if executablePath == "/usr/bin/env" {
+        if effectivePath == "/usr/bin/env" {
             execURL = URL(fileURLWithPath: "/usr/bin/env")
             args.append("pi")
         } else {
-            guard FileManager.default.isExecutableFile(atPath: executablePath) else {
-                throw LLMProviderError.modelUnavailable("pi CLI not found at \(executablePath)")
+            guard FileManager.default.isExecutableFile(atPath: effectivePath) else {
+                throw LLMProviderError.modelUnavailable("pi CLI not found at \(effectivePath)")
             }
-            execURL = URL(fileURLWithPath: executablePath)
+            execURL = URL(fileURLWithPath: effectivePath)
         }
 
         args.append(contentsOf: [
@@ -67,11 +69,20 @@ public struct PiCLIProvider: LLMProvider, Sendable {
         }
         args.append(combinedPrompt)
 
+        var processEnv = ProcessInfo.processInfo.environment
+        processEnv["PATH"] = CLIAuthService.augmentedPATH(from: processEnv["PATH"])
+        if processEnv["PI_CODING_AGENT_DIR"]?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false,
+           let helmDir = processEnv["HELM_PI_CONFIG_DIR"]?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !helmDir.isEmpty {
+            processEnv["PI_CODING_AGENT_DIR"] = helmDir
+        }
+
         let output: ProcessOutput
         do {
             output = try await ProcessRunner.run(
                 executableURL: execURL,
                 arguments: args,
+                environment: processEnv,
                 stdinData: nil,
                 timeoutSeconds: request.timeoutSeconds
             )

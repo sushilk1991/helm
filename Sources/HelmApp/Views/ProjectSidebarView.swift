@@ -115,13 +115,13 @@ public struct ProjectSidebarView: View {
                     .buttonStyle(HelmPrimaryButtonStyle())
 
                     Button {
-                        store.reopenOnboarding()
+                        store.openSettings()
                     } label: {
-                        Image(systemName: "slider.horizontal.3")
+                        Image(systemName: "gearshape")
                             .foregroundStyle(HelmInk.secondary)
                     }
                     .buttonStyle(HelmSecondaryButtonStyle())
-                    .help("Setup & AI Provider Preferences")
+                    .help("Settings & AI CLIs (⌘,)")
                 }
 
                 HStack(spacing: 6) {
@@ -247,6 +247,8 @@ public struct ProjectSidebarView: View {
             return "Update v\(release.version.displayString) available"
         case .downloading(let progress, let release):
             return "Downloading v\(release.version.displayString) (\(Int(progress * 100))%)"
+        case .waitingForIdle(let release):
+            return "v\(release.version.displayString) ready — waiting for active agents to finish"
         case .installing(let release):
             return "Installing v\(release.version.displayString)…"
         case .checking:
@@ -343,11 +345,21 @@ public struct ProjectSidebarView: View {
                         .progressViewStyle(.linear)
                 }
 
+            case .waitingForIdle(let release):
+                VStack(alignment: .leading, spacing: 6) {
+                    Label("v\(release.version.displayString) Downloaded & Verified", systemImage: "checkmark.shield.fill")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(HelmSemantic.steady)
+                    Text("Waiting for \(updater.activeRunningProjectCount) active project(s) to finish before restarting—no running agents will be interrupted.")
+                        .font(.caption)
+                        .foregroundStyle(HelmInk.secondary)
+                }
+
             case .installing(let release):
                 HStack(spacing: 8) {
                     ProgressView()
                         .controlSize(.small)
-                    Text("Verifying signature & installing v\(release.version.displayString)…")
+                    Text("Checkpointing active state & installing v\(release.version.displayString)…")
                         .font(.caption)
                         .foregroundStyle(HelmInk.secondary)
                 }
@@ -364,12 +376,46 @@ public struct ProjectSidebarView: View {
                 }
             }
 
+            if case .available = updater.state, updater.activeRunningProjectCount > 0 {
+                Text("\(updater.activeRunningProjectCount) project(s) currently running. Updating checkpoints state to SQLite and auto-resumes on relaunch, or waits until idle.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(HelmInk.muted)
+            }
+
             HStack(spacing: 8) {
                 if case .available(let release) = updater.state {
+                    if updater.activeRunningProjectCount > 0 {
+                        Button("When Idle") {
+                            Task { await updater.downloadAndInstall(release, deferUntilIdle: true) }
+                        }
+                        .buttonStyle(HelmSecondaryButtonStyle())
+
+                        Button {
+                            Task { await updater.downloadAndInstall(release, deferUntilIdle: false) }
+                        } label: {
+                            Text("Safe Update")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(HelmPrimaryButtonStyle())
+                    } else {
+                        Button {
+                            Task { await updater.downloadAndInstall(release, deferUntilIdle: false) }
+                        } label: {
+                            Label("Install & Restart", systemImage: "arrow.down.circle.fill")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(HelmPrimaryButtonStyle())
+                    }
+                } else if case .waitingForIdle(let release) = updater.state {
+                    Button("Cancel Wait") {
+                        updater.cancelWaitingForIdle()
+                    }
+                    .buttonStyle(HelmSecondaryButtonStyle())
+
                     Button {
-                        Task { await updater.downloadAndInstall(release) }
+                        Task { await updater.downloadAndInstall(release, deferUntilIdle: false) }
                     } label: {
-                        Label("Install & Restart", systemImage: "arrow.down.circle.fill")
+                        Text("Restart Now")
                             .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(HelmPrimaryButtonStyle())
@@ -419,18 +465,50 @@ public struct ProjectSidebarView: View {
             case .downloading(let progress, _):
                 ProgressView(value: progress)
                     .progressViewStyle(.linear)
+            case .waitingForIdle:
+                HStack(spacing: 6) {
+                    Button("Cancel") {
+                        updater.cancelWaitingForIdle()
+                    }
+                    .buttonStyle(HelmSecondaryButtonStyle())
+                    Button {
+                        Task { await updater.downloadAndInstall(release, deferUntilIdle: false) }
+                    } label: {
+                        Text("Restart Now")
+                            .font(.caption.weight(.semibold))
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(HelmPrimaryButtonStyle())
+                }
             case .installing:
                 ProgressView()
                     .progressViewStyle(.linear)
             default:
-                Button {
-                    Task { await updater.downloadAndInstall(release) }
-                } label: {
-                    Label("Update & Restart", systemImage: "arrow.down.circle.fill")
-                        .font(.caption.weight(.semibold))
-                        .frame(maxWidth: .infinity)
+                if updater.activeRunningProjectCount > 0 {
+                    HStack(spacing: 6) {
+                        Button("When Idle") {
+                            Task { await updater.downloadAndInstall(release, deferUntilIdle: true) }
+                        }
+                        .buttonStyle(HelmSecondaryButtonStyle())
+                        Button {
+                            Task { await updater.downloadAndInstall(release, deferUntilIdle: false) }
+                        } label: {
+                            Text("Safe Update")
+                                .font(.caption.weight(.semibold))
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(HelmPrimaryButtonStyle())
+                    }
+                } else {
+                    Button {
+                        Task { await updater.downloadAndInstall(release, deferUntilIdle: false) }
+                    } label: {
+                        Label("Update & Restart", systemImage: "arrow.down.circle.fill")
+                            .font(.caption.weight(.semibold))
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(HelmPrimaryButtonStyle())
                 }
-                .buttonStyle(HelmPrimaryButtonStyle())
             }
         }
         .padding(10)
@@ -441,10 +519,14 @@ public struct ProjectSidebarView: View {
         switch updater.state {
         case .downloading(let progress, _):
             return "Downloading \(Int(progress * 100))%…"
+        case .waitingForIdle:
+            return "Staged · waiting for active agents"
         case .installing:
-            return "Verifying & restarting…"
+            return "Checkpointing & restarting…"
         default:
-            return "Signed & notarized release ready"
+            return updater.activeRunningProjectCount > 0
+                ? "Auto-pauses & resumes active agents"
+                : "Signed & notarized release ready"
         }
     }
 

@@ -24,10 +24,10 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full v1 architecture 
 
 ## Download (macOS Apple Silicon)
 
-Download the **Developer ID signed & Apple-notarized** **`Helm-0.1.2-arm64.dmg`** installer from [GitHub Releases](https://github.com/sushilk1991/helm/releases/latest):
+Download the **Developer ID signed & Apple-notarized** **`Helm-0.1.3-arm64.dmg`** installer from [GitHub Releases](https://github.com/sushilk1991/helm/releases/latest):
 
-1. Open `Helm-0.1.2-arm64.dmg` and drag **Helm.app** into **Applications**.
-2. Launch **Helm** from Applications (macOS 15.0+ on Apple Silicon `arm64`). Built-in auto-update checks GitHub Releases automatically and lets you update in one click from the sidebar.
+1. Open `Helm-0.1.3-arm64.dmg` and drag **Helm.app** into **Applications**.
+2. Launch **Helm** from Applications (macOS 15.0+ on Apple Silicon `arm64`). Built-in auto-update checks GitHub Releases automatically and lets you update safely (either waiting until active agents finish or checkpointing & auto-resuming across restart).
 
 To build (and optionally sign & notarize) the DMG locally from source:
 ```bash
@@ -36,7 +36,7 @@ bash scripts/build_dmg.sh
 # HELM_SIGN_IDENTITY="Developer ID Application: ..." \
 #   HELM_NOTARY_KEY=/path/to/AuthKey.p8 HELM_NOTARY_KEY_ID=... HELM_NOTARY_ISSUER=... \
 #   bash scripts/build_dmg.sh
-# Output: dist/Helm-0.1.0-arm64.dmg (+ .sha256)
+# Output: dist/Helm-0.1.3-arm64.dmg (+ .sha256)
 ```
 
 ---
@@ -51,6 +51,7 @@ bash scripts/build_dmg.sh
   - `mock` — built-in deterministic provider (works offline with zero configuration)
   - `claude` — local `claude` CLI authenticated via Keychain/OAuth
   - `codex` — local `codex` CLI
+  - `agy` — local Antigravity CLI (`agy --print ... --output-format json`)
   - `pi` — local `pi` coding agent CLI (`pi` / `pycli`)
   - `http` — OpenAI-compatible HTTP endpoint (`HELM_LLM_API_KEY` / `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`, `HELM_LLM_BASE_URL` or `HELM_DIRECT_HTTP_URL`)
   - `foundation` — Apple `FoundationModels` on-device model (when available)

@@ -8,7 +8,12 @@ public struct CodexCLIProvider: LLMProvider, Sendable {
         self.executablePath = executablePath
     }
 
-    public static func resolveExecutablePath() -> String {
+    public static func resolveExecutablePath(environment: [String: String] = ProcessInfo.processInfo.environment) -> String {
+        if let override = environment["HELM_CODEX_PATH"]?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !override.isEmpty,
+           FileManager.default.isExecutableFile(atPath: override) {
+            return override
+        }
         let candidates = [
             "/opt/homebrew/bin/codex",
             "/usr/local/bin/codex",
@@ -34,16 +39,18 @@ public struct CodexCLIProvider: LLMProvider, Sendable {
         \(request.userPrompt)
         """
 
+        let effectivePath = ProcessInfo.processInfo.environment["HELM_CODEX_PATH"]
+            .flatMap { $0.isEmpty ? nil : $0 } ?? executablePath
         var args: [String] = []
         let execURL: URL
-        if executablePath == "/usr/bin/env" {
+        if effectivePath == "/usr/bin/env" {
             execURL = URL(fileURLWithPath: "/usr/bin/env")
             args.append("codex")
         } else {
-            guard FileManager.default.isExecutableFile(atPath: executablePath) else {
-                throw LLMProviderError.modelUnavailable("codex CLI not found at \(executablePath)")
+            guard FileManager.default.isExecutableFile(atPath: effectivePath) else {
+                throw LLMProviderError.modelUnavailable("codex CLI not found at \(effectivePath)")
             }
-            execURL = URL(fileURLWithPath: executablePath)
+            execURL = URL(fileURLWithPath: effectivePath)
         }
 
         args.append(contentsOf: [
@@ -57,11 +64,20 @@ public struct CodexCLIProvider: LLMProvider, Sendable {
             args.append(contentsOf: ["-m", model])
         }
 
+        var processEnv = ProcessInfo.processInfo.environment
+        processEnv["PATH"] = CLIAuthService.augmentedPATH(from: processEnv["PATH"])
+        if processEnv["CODEX_HOME"]?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false,
+           let helmDir = processEnv["HELM_CODEX_HOME"]?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !helmDir.isEmpty {
+            processEnv["CODEX_HOME"] = helmDir
+        }
+
         let output: ProcessOutput
         do {
             output = try await ProcessRunner.run(
                 executableURL: execURL,
                 arguments: args,
+                environment: processEnv,
                 stdinData: Data(combinedPrompt.utf8),
                 timeoutSeconds: request.timeoutSeconds
             )

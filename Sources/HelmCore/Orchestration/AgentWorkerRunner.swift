@@ -144,7 +144,8 @@ public struct AgentWorkerRunner: Sendable {
         let systemPrompt = "Role: \(agent.role.rawValue)\nPersonality: \(personalityLine)\nAgentGoal: \(agent.goal)\nOperate inside workspace: \(project.workspaceRoot.path)"
         let userPrompt = "TASK_EXECUTION\nTaskID: \(task.id.uuidString)\n" + contextParts.joined(separator: "\n\n")
 
-        let tools: [LLMToolSchema] = [
+        // Only advertise tools that match this agent's granted capabilities so LLMs don't trigger avoidable holds.
+        var tools: [LLMToolSchema] = [
             LLMToolSchema(
                 name: "complete_task",
                 description: "Complete the task and optionally propose shared-state output.",
@@ -155,27 +156,35 @@ public struct AgentWorkerRunner: Sendable {
                 description: "Write a relative file inside the project workspace.",
                 parametersJSONSchema: "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"content\":{\"type\":\"string\"}}}"
             ),
-            LLMToolSchema(
+        ]
+        if agent.capabilities.contains(.codeExec) {
+            tools.append(LLMToolSchema(
                 name: "run_command",
                 description: "Execute a command inside the isolated sandbox.",
                 parametersJSONSchema: "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"}}}"
-            ),
-            LLMToolSchema(
+            ))
+        }
+        if agent.capabilities.contains(.browser) {
+            tools.append(LLMToolSchema(
                 name: "browser_act",
                 description: "Navigate or interact with a headless web page using Vision OCR and CDP.",
                 parametersJSONSchema: "{\"type\":\"object\",\"properties\":{\"url\":{\"type\":\"string\"},\"action\":{\"type\":\"string\",\"enum\":[\"navigate\",\"click_ocr\",\"click_css\",\"type_text\",\"eval_js\"]},\"target\":{\"type\":\"string\"},\"query\":{\"type\":\"string\"},\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"},\"text\":{\"type\":\"string\"},\"submit\":{\"type\":\"boolean\"},\"script\":{\"type\":\"string\"}}}"
-            ),
-            LLMToolSchema(
+            ))
+        }
+        if agent.capabilities.contains(.proposeSharedState) {
+            tools.append(LLMToolSchema(
                 name: "propose_shared_memory",
                 description: "Write a fact or observation to shared memory.",
                 parametersJSONSchema: "{\"type\":\"object\",\"properties\":{\"key\":{\"type\":\"string\"},\"title\":{\"type\":\"string\"},\"content\":{\"type\":\"string\"}}}"
-            ),
-            LLMToolSchema(
+            ))
+        }
+        if agent.capabilities.contains(.requestHumanDecision) {
+            tools.append(LLMToolSchema(
                 name: "ask_human",
                 description: "Pause and ask the human operator for a decision.",
                 parametersJSONSchema: "{\"type\":\"object\",\"properties\":{\"question\":{\"type\":\"string\"},\"options\":{\"type\":\"array\"}}}"
-            ),
-        ]
+            ))
+        }
 
         let provider: any LLMProvider
         do {
@@ -227,19 +236,39 @@ public struct AgentWorkerRunner: Sendable {
                     options: ["retry", "redirect", "abort"]
                 )
             }
+            let errMsg = err.localizedDescription
+            if let authProvider = LLMAuthErrorDetector.detectRequiredAuthProvider(from: errMsg, backend: agent.backend) {
+                return .hold(
+                    kind: .providerFailure,
+                    severity: .critical,
+                    title: "CLI Sign-In Required (\(authProvider.displayName))",
+                    summary: "\(agent.name) could not reach \(authProvider.displayName) because it is not signed in or the session expired. Open Settings → Accounts & Login to sign in via browser, then click Retry. Details: \(errMsg)",
+                    options: ["retry", "redirect", "abort"]
+                )
+            }
             return .hold(
                 kind: .providerFailure,
                 severity: .critical,
                 title: "LLM Provider Failure",
-                summary: "Agent '\(agent.name)' provider failed: \(err.localizedDescription)",
+                summary: "Agent '\(agent.name)' provider failed: \(errMsg)",
                 options: ["retry", "redirect", "abort"]
             )
         } catch {
+            let errMsg = error.localizedDescription
+            if let authProvider = LLMAuthErrorDetector.detectRequiredAuthProvider(from: errMsg, backend: agent.backend) {
+                return .hold(
+                    kind: .providerFailure,
+                    severity: .critical,
+                    title: "CLI Sign-In Required (\(authProvider.displayName))",
+                    summary: "\(agent.name) could not reach \(authProvider.displayName) because it is not signed in or the session expired. Open Settings → Accounts & Login to sign in via browser, then click Retry. Details: \(errMsg)",
+                    options: ["retry", "redirect", "abort"]
+                )
+            }
             return .hold(
                 kind: .providerFailure,
                 severity: .critical,
                 title: "LLM Provider Failure",
-                summary: error.localizedDescription,
+                summary: errMsg,
                 options: ["retry", "redirect", "abort"]
             )
         }
@@ -439,11 +468,29 @@ public struct AgentWorkerRunner: Sendable {
                 let cmd = (args["command"] as? String) ?? ""
                 if let sandboxExecutor {
                     try? await database.updateAgentState(id: agent.id, state: .executing)
+                    var sandboxEnv: [String: String] = [:]
+                    let currentEnv = ProcessInfo.processInfo.environment
+                    if currentEnv["HELM_FORWARD_SANDBOX_AUTH"] == "1" {
+                        let forwardableKeys = [
+                            "ANTHROPIC_API_KEY",
+                            "OPENAI_API_KEY",
+                            "GEMINI_API_KEY",
+                            "OPENROUTER_API_KEY",
+                            "HELM_LLM_API_KEY",
+                        ]
+                        for key in forwardableKeys {
+                            if let value = currentEnv[key]?.trimmingCharacters(in: .whitespacesAndNewlines),
+                               !value.isEmpty {
+                                sandboxEnv[key] = value
+                            }
+                        }
+                    }
                     let req = ExecutionRequest(
                         projectID: project.id,
                         workspacePath: project.workspaceRoot,
                         command: cmd,
-                        timeoutSeconds: project.budgetPolicy.stepTimeoutSeconds
+                        timeoutSeconds: project.budgetPolicy.stepTimeoutSeconds,
+                        environment: sandboxEnv
                     )
                     do {
                         let res = try await sandboxExecutor.execute(req)

@@ -74,12 +74,13 @@ public enum HelmUpdateState: Equatable, Sendable {
     case upToDate(checkedAt: Date)
     case available(HelmReleaseInfo)
     case downloading(progress: Double, release: HelmReleaseInfo)
+    case waitingForIdle(release: HelmReleaseInfo)
     case installing(release: HelmReleaseInfo)
     case failed(message: String)
 
     public var availableRelease: HelmReleaseInfo? {
         switch self {
-        case .available(let info), .downloading(_, let info), .installing(let info):
+        case .available(let info), .downloading(_, let info), .waitingForIdle(let info), .installing(let info):
             return info
         default:
             return nil
@@ -87,8 +88,12 @@ public enum HelmUpdateState: Equatable, Sendable {
     }
 
     public var hasUpdateAvailable: Bool {
-        if case .available = self { return true }
-        return false
+        switch self {
+        case .available, .waitingForIdle:
+            return true
+        default:
+            return false
+        }
     }
 
     public var isBusy: Bool {
@@ -115,9 +120,16 @@ public final class AppUpdateManager {
     public let currentVersion: HelmSemVer
     public let feedURL: URL
 
+    /// Hook provided by HelmWorkspaceStore to query active running projects and cleanly checkpoint/pause before restart.
+    public var runningProjectCountProvider: (() -> Int)?
+    public var prepareForSafeRestart: (() async -> Void)?
+
     private let urlSession: URLSession
     private let autoCheckEnabled: Bool
     private var periodicTask: Task<Void, Never>?
+    private var stagedWorkDir: URL?
+    private var stagedDMGPath: URL?
+    private var stagedRelease: HelmReleaseInfo?
 
     public init(
         currentVersionString: String? = nil,
@@ -127,9 +139,9 @@ public final class AppUpdateManager {
         urlSession: URLSession = .shared
     ) {
         let bundleVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String
-        let resolvedVersion = currentVersionString ?? bundleVersion ?? "0.1.2"
+        let resolvedVersion = currentVersionString ?? bundleVersion ?? "0.1.3"
         self.currentVersionString = resolvedVersion
-        self.currentVersion = HelmSemVer(parsing: resolvedVersion) ?? HelmSemVer(major: 0, minor: 1, patch: 2)
+        self.currentVersion = HelmSemVer(parsing: resolvedVersion) ?? HelmSemVer(major: 0, minor: 1, patch: 3)
 
         if let feedURL {
             self.feedURL = feedURL
@@ -144,14 +156,17 @@ public final class AppUpdateManager {
         self.urlSession = urlSession
     }
 
+    public var activeRunningProjectCount: Int {
+        runningProjectCountProvider?() ?? 0
+    }
+
     public func startPeriodicChecks() {
         guard autoCheckEnabled, periodicTask == nil else { return }
         periodicTask = Task { [weak self] in
-            // Short calm delay after launch so startup stays instantaneous
             try? await Task.sleep(for: .seconds(3))
             while !Task.isCancelled {
                 await self?.checkForUpdates(userInitiated: false)
-                try? await Task.sleep(for: .seconds(60 * 60 * 4)) // Every 4 hours
+                try? await Task.sleep(for: .seconds(60 * 60 * 4))
             }
         }
     }
@@ -163,6 +178,7 @@ public final class AppUpdateManager {
 
     public func checkForUpdates(userInitiated: Bool) async {
         guard !state.isBusy else { return }
+        if case .waitingForIdle = state, !userInitiated { return }
         if userInitiated {
             state = .checking
         } else if case .available = state {
@@ -201,21 +217,32 @@ public final class AppUpdateManager {
         } catch {
             if userInitiated {
                 state = .failed(message: error.localizedDescription)
-            } else {
-                // Silent failure on unattended background checks so we never disturb the user
-                if case .checking = state {
-                    state = .idle
-                }
+            } else if case .checking = state {
+                state = .idle
             }
         }
     }
 
-    public func downloadAndInstall(_ release: HelmReleaseInfo) async {
+    /// Downloads & verifies the DMG first while running agents stay undisturbed.
+    /// If `deferUntilIdle` is true and projects are running, waits until all projects finish before installing.
+    /// Otherwise cleanly checkpoints & pauses active projects (recording them to auto-resume on relaunch) before swapping.
+    public func downloadAndInstall(_ release: HelmReleaseInfo, deferUntilIdle: Bool = false) async {
         guard let dmgURL = release.dmgURL else {
             NSWorkspace.shared.open(release.htmlURL)
             return
         }
         guard !state.isBusy else { return }
+
+        // If already downloaded & verified for this release, skip straight to apply/defer
+        if stagedRelease == release, let localDMG = stagedDMGPath, let workDir = stagedWorkDir,
+           FileManager.default.fileExists(atPath: localDMG.path) {
+            if deferUntilIdle && activeRunningProjectCount > 0 {
+                state = .waitingForIdle(release: release)
+                return
+            }
+            await applyVerifiedDMG(localDMG: localDMG, workDir: workDir, release: release)
+            return
+        }
 
         state = .downloading(progress: 0.02, release: release)
 
@@ -226,7 +253,7 @@ public final class AppUpdateManager {
             try FileManager.default.createDirectory(at: workDir, withIntermediateDirectories: true)
             let localDMG = workDir.appendingPathComponent(dmgURL.lastPathComponent)
 
-            // 1. Stream download DMG with live progress updates
+            // 1. Stream download DMG with live progress (never interrupts running agents)
             var req = URLRequest(url: dmgURL)
             req.timeoutInterval = 120
             req.setValue("Helm/\(currentVersionString) (macOS)", forHTTPHeaderField: "User-Agent")
@@ -264,11 +291,8 @@ public final class AppUpdateManager {
             if !buffer.isEmpty {
                 try handle.write(contentsOf: buffer)
                 hasher.update(data: buffer)
-                downloadedBytes += Int64(buffer.count)
             }
             try handle.close()
-
-            state = .installing(release: release)
 
             // 2. Verify SHA-256 against published .sha256 sidecar if present
             if let shaURL = release.sha256URL {
@@ -291,7 +315,42 @@ public final class AppUpdateManager {
                 }
             }
 
-            // 3. Mount read-only, verify code signature of bundled Helm.app
+            stagedWorkDir = workDir
+            stagedDMGPath = localDMG
+            stagedRelease = release
+
+            if deferUntilIdle && activeRunningProjectCount > 0 {
+                state = .waitingForIdle(release: release)
+                return
+            }
+
+            await applyVerifiedDMG(localDMG: localDMG, workDir: workDir, release: release)
+        } catch {
+            try? FileManager.default.removeItem(at: workDir)
+            state = .failed(message: error.localizedDescription)
+        }
+    }
+
+    public func notifyProjectsBecameIdle() async {
+        guard case .waitingForIdle(let release) = state,
+              activeRunningProjectCount == 0,
+              let localDMG = stagedDMGPath,
+              let workDir = stagedWorkDir else {
+            return
+        }
+        await applyVerifiedDMG(localDMG: localDMG, workDir: workDir, release: release)
+    }
+
+    public func cancelWaitingForIdle() {
+        if case .waitingForIdle(let release) = state {
+            state = .available(release)
+        }
+    }
+
+    private func applyVerifiedDMG(localDMG: URL, workDir: URL, release: HelmReleaseInfo) async {
+        state = .installing(release: release)
+        do {
+            // 1. Mount read-only and verify code signature of bundled Helm.app
             let mountPoint = workDir.appendingPathComponent("mount", isDirectory: true)
             try FileManager.default.createDirectory(at: mountPoint, withIntermediateDirectories: true)
 
@@ -311,7 +370,11 @@ public final class AppUpdateManager {
 
             try await runProcess("/usr/bin/codesign", arguments: ["--verify", "--deep", "--strict", mountedApp.path])
 
-            // 4. Swap in-place if running from a writable .app bundle; otherwise open DMG for manual drag-install
+            // 2. Gracefully checkpoint & pause any running projects so state is preserved and auto-resumes after restart
+            if let prepareForSafeRestart {
+                await prepareForSafeRestart()
+            }
+
             let currentAppURL = Bundle.main.bundleURL
             let canSelfReplace = currentAppURL.pathExtension == "app"
                 && !currentAppURL.path.hasPrefix("/Volumes/")
@@ -356,7 +419,6 @@ public final class AppUpdateManager {
                 state = .available(release)
             }
         } catch {
-            try? FileManager.default.removeItem(at: workDir)
             state = .failed(message: error.localizedDescription)
         }
     }

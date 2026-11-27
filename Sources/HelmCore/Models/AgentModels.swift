@@ -139,6 +139,7 @@ public enum LLMBackendKind: String, Codable, Sendable, CaseIterable {
     case mock
     case claudeCLI = "claude"
     case codexCLI = "codex"
+    case agyCLI = "agy"
     case piCLI = "pi"
     case directHTTP = "http"
     case foundationModels = "foundation"
@@ -149,6 +150,7 @@ public enum LLMBackendKind: String, Codable, Sendable, CaseIterable {
         case "mock": return .mock
         case "claude", "claudecli", "claude_cli": return .claudeCLI
         case "codex", "codexcli", "codex_cli": return .codexCLI
+        case "agy", "agycli", "agy_cli", "antigravity", "tigravity": return .agyCLI
         case "pi", "picli", "pi_cli", "pycli", "py_cli", "pyagent", "piagent": return .piCLI
         case "http", "directhttp", "direct_http": return .directHTTP
         case "foundation", "foundationmodels", "foundation_models": return .foundationModels

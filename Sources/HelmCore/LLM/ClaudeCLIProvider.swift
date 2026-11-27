@@ -8,7 +8,12 @@ public struct ClaudeCLIProvider: LLMProvider, Sendable {
         self.executablePath = executablePath
     }
 
-    public static func resolveExecutablePath() -> String {
+    public static func resolveExecutablePath(environment: [String: String] = ProcessInfo.processInfo.environment) -> String {
+        if let override = environment["HELM_CLAUDE_PATH"]?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !override.isEmpty,
+           FileManager.default.isExecutableFile(atPath: override) {
+            return override
+        }
         let candidates = [
             "/opt/homebrew/bin/claude",
             "/usr/local/bin/claude",
@@ -27,16 +32,18 @@ public struct ClaudeCLIProvider: LLMProvider, Sendable {
             tools: request.tools
         )
 
+        let effectivePath = ProcessInfo.processInfo.environment["HELM_CLAUDE_PATH"]
+            .flatMap { $0.isEmpty ? nil : $0 } ?? executablePath
         var args: [String] = []
         let execURL: URL
-        if executablePath == "/usr/bin/env" {
+        if effectivePath == "/usr/bin/env" {
             execURL = URL(fileURLWithPath: "/usr/bin/env")
             args.append("claude")
         } else {
-            guard FileManager.default.isExecutableFile(atPath: executablePath) else {
-                throw LLMProviderError.modelUnavailable("claude CLI not found at \(executablePath)")
+            guard FileManager.default.isExecutableFile(atPath: effectivePath) else {
+                throw LLMProviderError.modelUnavailable("claude CLI not found at \(effectivePath)")
             }
-            execURL = URL(fileURLWithPath: executablePath)
+            execURL = URL(fileURLWithPath: effectivePath)
         }
 
         // CRITICAL: Never pass --bare (which disables Keychain/OAuth auth).
@@ -51,11 +58,20 @@ public struct ClaudeCLIProvider: LLMProvider, Sendable {
             args.append(contentsOf: ["--model", model])
         }
 
+        var processEnv = ProcessInfo.processInfo.environment
+        processEnv["PATH"] = CLIAuthService.augmentedPATH(from: processEnv["PATH"])
+        if processEnv["CLAUDE_CONFIG_DIR"]?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false,
+           let helmDir = processEnv["HELM_CLAUDE_CONFIG_DIR"]?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !helmDir.isEmpty {
+            processEnv["CLAUDE_CONFIG_DIR"] = helmDir
+        }
+
         let output: ProcessOutput
         do {
             output = try await ProcessRunner.run(
                 executableURL: execURL,
                 arguments: args,
+                environment: processEnv,
                 timeoutSeconds: request.timeoutSeconds
             )
         } catch let err as ProcessRunnerError {

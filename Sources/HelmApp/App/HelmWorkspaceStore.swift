@@ -9,6 +9,7 @@ public struct LocalEnvironmentStatus: Sendable, Equatable {
     public let chromeAvailable: Bool
     public let claudeCLIAvailable: Bool
     public let codexCLIAvailable: Bool
+    public let agyCLIAvailable: Bool
     public let piCLIAvailable: Bool
     public let foundationModelsSupported: Bool
 
@@ -16,9 +17,11 @@ public struct LocalEnvironmentStatus: Sendable, Equatable {
         let fm = FileManager.default
         let chromePath = environment["HELM_CHROME_PATH"] ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
         let chrome = fm.isExecutableFile(atPath: chromePath)
-        let claude = isToolOnPath("claude", environment: environment)
-        let codex = isToolOnPath("codex", environment: environment)
-        let pi = isToolOnPath("pi", environment: environment) || isToolOnPath("pycli", environment: environment)
+        let claude = isToolOnPath("claude", overrideKey: "HELM_CLAUDE_PATH", environment: environment)
+        let codex = isToolOnPath("codex", overrideKey: "HELM_CODEX_PATH", environment: environment)
+        let agy = isToolOnPath("agy", overrideKey: "HELM_AGY_PATH", environment: environment)
+        let pi = isToolOnPath("pi", overrideKey: "HELM_PI_PATH", environment: environment)
+            || isToolOnPath("pycli", overrideKey: "HELM_PI_PATH", environment: environment)
         let supportsFM: Bool
         if #available(macOS 26.0, *) {
             supportsFM = true
@@ -30,6 +33,7 @@ public struct LocalEnvironmentStatus: Sendable, Equatable {
             chromeAvailable: chrome,
             claudeCLIAvailable: claude,
             codexCLIAvailable: codex,
+            agyCLIAvailable: agy,
             piCLIAvailable: pi,
             foundationModelsSupported: supportsFM
         )
@@ -38,19 +42,26 @@ public struct LocalEnvironmentStatus: Sendable, Equatable {
     public var recommendedBackend: LLMBackendKind {
         if claudeCLIAvailable { return .claudeCLI }
         if codexCLIAvailable { return .codexCLI }
+        if agyCLIAvailable { return .agyCLI }
         if piCLIAvailable { return .piCLI }
         if foundationModelsSupported { return .foundationModels }
         return .mock
     }
 
-    private static func isToolOnPath(_ name: String, environment: [String: String]) -> Bool {
+    private static func isToolOnPath(_ name: String, overrideKey: String, environment: [String: String]) -> Bool {
         let fm = FileManager.default
+        if let custom = environment[overrideKey]?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !custom.isEmpty,
+           fm.isExecutableFile(atPath: custom) {
+            return true
+        }
         let searchDirs = [
             "/opt/homebrew/bin",
             "/usr/local/bin",
             "\(NSHomeDirectory())/.local/bin",
             "\(NSHomeDirectory())/.npm-global/bin",
             "\(NSHomeDirectory())/.bun/bin",
+            "\(NSHomeDirectory())/.gemini/antigravity-cli/bin",
         ] + (environment["PATH"]?.split(separator: ":").map(String.init) ?? [])
         for dir in searchDirs {
             let full = (dir as NSString).appendingPathComponent(name)
@@ -79,6 +90,7 @@ public final class HelmWorkspaceStore {
     public let browserService: BrowseReadActTool
     public let notificationCoordinator: NotificationCoordinator
     public let updateManager: AppUpdateManager
+    public let cliAuthManager: CLIAuthManager
 
     public var selectedProjectID: UUID?
     public var selectedAgentID: UUID?
@@ -86,17 +98,24 @@ public final class HelmWorkspaceStore {
     public var inspectorTab: InspectorTab = .agent
     public var showNewProjectSheet: Bool = false
     public var showAddAgentSheet: Bool = false
+    public var showSettingsSheet: Bool = false
+    public var highlightedAuthProvider: CLIAuthProviderKind? = nil
     public var showOnboarding: Bool = false
     public var hasCompletedOnboarding: Bool = false
 
     public var defaultBackend: LLMBackendKind = .mock
     public var apiBaseURL: String = ""
     public var apiKeyInput: String = ""
+    public var claudeCLIPath: String = ""
+    public var codexCLIPath: String = ""
+    public var agyCLIPath: String = ""
+    public var piCLIPath: String = ""
     public var environmentStatus: LocalEnvironmentStatus = LocalEnvironmentStatus(
         virtualizationAvailable: EntitlementChecker.isVirtualizationAvailable(),
         chromeAvailable: false,
         claudeCLIAvailable: false,
         codexCLIAvailable: false,
+        agyCLIAvailable: false,
         piCLIAvailable: false,
         foundationModelsSupported: false
     )
@@ -127,6 +146,11 @@ public final class HelmWorkspaceStore {
     private static let onboardingKey = "helm.v1.onboardingCompleted"
     private static let defaultBackendKey = "helm.v1.defaultBackend"
     private static let apiBaseURLKey = "helm.v1.apiBaseURL"
+    private static let claudePathKey = "helm.v1.claudeCLIPath"
+    private static let codexPathKey = "helm.v1.codexCLIPath"
+    private static let agyPathKey = "helm.v1.agyCLIPath"
+    private static let piPathKey = "helm.v1.piCLIPath"
+    private static let resumeAfterUpdateKey = "helm.v1.resumeAfterUpdateProjectIDs"
 
     public init(
         controlPlane: HelmControlPlane,
@@ -135,6 +159,7 @@ public final class HelmWorkspaceStore {
         browserService: BrowseReadActTool,
         notificationCoordinator: NotificationCoordinator,
         updateManager: AppUpdateManager? = nil,
+        cliAuthManager: CLIAuthManager? = nil,
         forcedReduceMotion: Bool = false
     ) {
         self.controlPlane = controlPlane
@@ -145,6 +170,10 @@ public final class HelmWorkspaceStore {
         self.updateManager = updateManager ?? AppUpdateManager(
             environment: ["HELM_DISABLE_UPDATE_CHECK": "1"],
             arguments: ["--headless"]
+        )
+        self.cliAuthManager = cliAuthManager ?? CLIAuthManager(
+            arguments: ["--headless"],
+            environment: ["HELM_DISABLE_AUTH_PROBE": "1"]
         )
         self.forcedReduceMotion = forcedReduceMotion
     }
@@ -166,6 +195,7 @@ public final class HelmWorkspaceStore {
         )
         let notif = NotificationCoordinator(arguments: arguments, environment: environment)
         let updater = AppUpdateManager(environment: environment, arguments: arguments)
+        let authManager = CLIAuthManager(arguments: arguments, environment: environment)
         let reduceMotion = arguments.contains("--reduce-motion") || environment["HELM_REDUCE_MOTION"] == "1"
         let store = HelmWorkspaceStore(
             controlPlane: cp,
@@ -174,9 +204,11 @@ public final class HelmWorkspaceStore {
             browserService: browser,
             notificationCoordinator: notif,
             updateManager: updater,
+            cliAuthManager: authManager,
             forcedReduceMotion: reduceMotion
         )
-        let envStatus = LocalEnvironmentStatus.detect(environment: environment)
+        store.loadPersistedCLISettings()
+        let envStatus = LocalEnvironmentStatus.detect()
         store.environmentStatus = envStatus
         if let savedRaw = UserDefaults.standard.string(forKey: defaultBackendKey),
            let saved = LLMBackendKind(rawValue: savedRaw) {
@@ -184,8 +216,8 @@ public final class HelmWorkspaceStore {
         } else {
             store.defaultBackend = envStatus.recommendedBackend
         }
-        store.apiBaseURL = UserDefaults.standard.string(forKey: apiBaseURLKey) ?? ""
         store.hasCompletedOnboarding = UserDefaults.standard.bool(forKey: onboardingKey)
+        store.wireUpdateLifecycleHooks()
         return store
     }
 
@@ -267,20 +299,136 @@ public final class HelmWorkspaceStore {
         return latestExecutionResultByProject[project.id]
     }
 
-    // MARK: - Onboarding & Preferences
+    public var runningProjectCount: Int {
+        controlPlane.projects.filter { $0.status == .running }.count
+    }
 
-    public func savePreferences(backend: LLMBackendKind, baseURL: String, apiKey: String) {
-        defaultBackend = backend
-        apiBaseURL = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        apiKeyInput = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        UserDefaults.standard.set(backend.rawValue, forKey: Self.defaultBackendKey)
-        UserDefaults.standard.set(apiBaseURL, forKey: Self.apiBaseURLKey)
-        if !apiBaseURL.isEmpty {
-            setenv("HELM_LLM_BASE_URL", apiBaseURL, 1)
-        }
+    public func activeTask(for agentID: UUID) -> DelegatedTask? {
+        selectedProjectTasks.first(where: { $0.assignedAgentID == agentID && $0.status == .running })
+    }
+
+    public var selectedProjectActiveTasks: [DelegatedTask] {
+        selectedProjectTasks.filter { $0.status == .running }
+    }
+
+    public var selectedProjectLatestEvent: RunEvent? {
+        selectedProjectEvents.last
+    }
+
+    // MARK: - Onboarding, Settings & Safe Update Hooks
+
+    public func loadPersistedCLISettings() {
+        apiBaseURL = UserDefaults.standard.string(forKey: Self.apiBaseURLKey) ?? ""
+        claudeCLIPath = UserDefaults.standard.string(forKey: Self.claudePathKey) ?? ""
+        codexCLIPath = UserDefaults.standard.string(forKey: Self.codexPathKey) ?? ""
+        agyCLIPath = UserDefaults.standard.string(forKey: Self.agyPathKey) ?? ""
+        piCLIPath = UserDefaults.standard.string(forKey: Self.piPathKey) ?? ""
+        applyCLIEnvironmentOverrides()
+    }
+
+    public func saveCLISettings(
+        defaultBackend: LLMBackendKind,
+        claudePath: String,
+        codexPath: String,
+        agyPath: String,
+        piPath: String,
+        apiBaseURL: String,
+        apiKey: String
+    ) {
+        self.defaultBackend = defaultBackend
+        self.claudeCLIPath = claudePath.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.codexCLIPath = codexPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.agyCLIPath = agyPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.piCLIPath = piPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.apiBaseURL = apiBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.apiKeyInput = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        UserDefaults.standard.set(defaultBackend.rawValue, forKey: Self.defaultBackendKey)
+        UserDefaults.standard.set(self.claudeCLIPath, forKey: Self.claudePathKey)
+        UserDefaults.standard.set(self.codexCLIPath, forKey: Self.codexPathKey)
+        UserDefaults.standard.set(self.agyCLIPath, forKey: Self.agyPathKey)
+        UserDefaults.standard.set(self.piCLIPath, forKey: Self.piPathKey)
+        UserDefaults.standard.set(self.apiBaseURL, forKey: Self.apiBaseURLKey)
+
+        applyCLIEnvironmentOverrides()
+        rescanEnvironment()
+    }
+
+    public func rescanEnvironment() {
+        environmentStatus = LocalEnvironmentStatus.detect()
+    }
+
+    private func applyCLIEnvironmentOverrides() {
+        setOrUnsetEnv("HELM_CLAUDE_PATH", claudeCLIPath)
+        setOrUnsetEnv("HELM_CODEX_PATH", codexCLIPath)
+        setOrUnsetEnv("HELM_AGY_PATH", agyCLIPath)
+        setOrUnsetEnv("HELM_PI_PATH", piCLIPath)
+        setOrUnsetEnv("HELM_LLM_BASE_URL", apiBaseURL)
         if !apiKeyInput.isEmpty {
             setenv("HELM_LLM_API_KEY", apiKeyInput, 1)
         }
+    }
+
+    private func setOrUnsetEnv(_ key: String, _ value: String) {
+        if value.isEmpty {
+            unsetenv(key)
+        } else {
+            setenv(key, value, 1)
+        }
+    }
+
+    public func wireUpdateLifecycleHooks() {
+        updateManager.runningProjectCountProvider = { [weak self] in
+            self?.runningProjectCount ?? 0
+        }
+        updateManager.prepareForSafeRestart = { [weak self] in
+            await self?.checkpointAndPauseForUpdate()
+        }
+    }
+
+    public func checkpointAndPauseForUpdate() async {
+        let runningIDs = controlPlane.projects
+            .filter { $0.status == .running }
+            .map { $0.id.uuidString }
+        if !runningIDs.isEmpty {
+            UserDefaults.standard.set(runningIDs, forKey: Self.resumeAfterUpdateKey)
+            await pauseAllProjects()
+        }
+    }
+
+    private func resumeProjectsAfterUpdateIfNeeded() async {
+        guard let saved = UserDefaults.standard.stringArray(forKey: Self.resumeAfterUpdateKey),
+              !saved.isEmpty else {
+            return
+        }
+        UserDefaults.standard.removeObject(forKey: Self.resumeAfterUpdateKey)
+        var resumedAny = false
+        for raw in saved {
+            guard let id = UUID(uuidString: raw),
+                  controlPlane.projects.contains(where: { $0.id == id && $0.status != .held && $0.status != .completed }) else {
+                continue
+            }
+            try? await controlPlane.startProject(projectID: id)
+            pendingStartProjectIDs.insert(id)
+            resumedAny = true
+        }
+        if resumedAny {
+            pollingGraceDeadline = Date().addingTimeInterval(3.0)
+            await reloadAll()
+            ensurePollingState(forceStart: true)
+        }
+    }
+
+    public func savePreferences(backend: LLMBackendKind, baseURL: String, apiKey: String) {
+        saveCLISettings(
+            defaultBackend: backend,
+            claudePath: claudeCLIPath,
+            codexPath: codexCLIPath,
+            agyPath: agyCLIPath,
+            piPath: piCLIPath,
+            apiBaseURL: baseURL,
+            apiKey: apiKey
+        )
     }
 
     public func completeOnboarding() {
@@ -290,8 +438,22 @@ public final class HelmWorkspaceStore {
     }
 
     public func reopenOnboarding() {
-        environmentStatus = LocalEnvironmentStatus.detect()
+        showSettingsSheet = false
+        rescanEnvironment()
         showOnboarding = true
+    }
+
+    public func openSettings() {
+        rescanEnvironment()
+        cliAuthManager.refreshAllStatuses()
+        showSettingsSheet = true
+    }
+
+    public func openSettingsToAuth(highlighting provider: CLIAuthProviderKind? = nil) {
+        highlightedAuthProvider = provider
+        rescanEnvironment()
+        cliAuthManager.refreshAllStatuses()
+        showSettingsSheet = true
     }
 
     // MARK: - Lifecycle & Polling
@@ -301,6 +463,7 @@ public final class HelmWorkspaceStore {
             await ocrService.warmUpInBackground()
         }
         environmentStatus = LocalEnvironmentStatus.detect()
+        cliAuthManager.refreshAllStatuses()
         await reloadAll()
         if selectedProjectID == nil {
             selectedProjectID = controlPlane.projects.first?.id
@@ -313,6 +476,7 @@ public final class HelmWorkspaceStore {
             isInspectorVisible = false
         }
         settleHelmCounter += 1
+        await resumeProjectsAfterUpdateIfNeeded()
         ensurePollingState()
         updateManager.startPeriodicChecks()
     }
@@ -447,6 +611,7 @@ public final class HelmWorkspaceStore {
                 let stillNeeded = controlPlane.projects.contains { $0.status == .running }
                     || (!pendingStartProjectIDs.isEmpty && (pollingGraceDeadline.map { Date() < $0 } ?? false))
                 if !stillNeeded {
+                    await updateManager.notifyProjectsBecameIdle()
                     break
                 }
             }
@@ -475,6 +640,7 @@ public final class HelmWorkspaceStore {
     public func shutdownBackgroundWork() async {
         stopPollingForTermination()
         updateManager.stopPeriodicChecks()
+        cliAuthManager.cancelActiveLogin()
         let browserService = self.browserService
         let sandboxExecutor = self.sandboxExecutor
         await withTaskGroup(of: Void.self) { group in

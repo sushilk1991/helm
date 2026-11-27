@@ -30,8 +30,29 @@ public struct DetailInspectorView: View {
 
     public var body: some View {
         VStack(spacing: 0) {
-            // Clean inspector header with segmented tabs + close button
-            HStack(spacing: 8) {
+            // Aligned Native macOS Inspector Header (Title + Clean Top-Right Close + Full-Width Segmented Tabs)
+            VStack(spacing: 10) {
+                HStack {
+                    Text(store.selectedAgent?.name ?? "Inspector")
+                        .font(.callout.weight(.semibold))
+                        .foregroundStyle(HelmInk.primary)
+                        .lineLimit(1)
+                    Spacer()
+                    Button {
+                        withAnimation(HelmMotion.state) {
+                            store.isInspectorVisible = false
+                        }
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundStyle(HelmInk.secondary)
+                            .frame(width: 22, height: 22)
+                            .background(HelmSurface.well, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                    .help("Hide Inspector (⌥⌘I)")
+                }
+
                 Picker("", selection: $store.inspectorTab) {
                     ForEach(InspectorTab.allCases) { tab in
                         Text(tab.rawValue).tag(tab)
@@ -39,23 +60,10 @@ public struct DetailInspectorView: View {
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
-
-                Button {
-                    withAnimation(HelmMotion.state) {
-                        store.isInspectorVisible = false
-                    }
-                } label: {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(HelmInk.muted)
-                        .frame(width: 24, height: 24)
-                        .background(HelmSurface.elevated, in: Circle())
-                }
-                .buttonStyle(.plain)
-                .help("Hide Inspector (⌥⌘I)")
             }
             .padding(.horizontal, 16)
-            .padding(.vertical, 14)
+            .padding(.top, 14)
+            .padding(.bottom, 12)
 
             Divider().overlay(HelmSurface.line)
 

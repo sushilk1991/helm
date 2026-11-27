@@ -12,6 +12,8 @@ public struct OnboardingFlowView: View {
     @State private var selectedBackend: LLMBackendKind = .mock
     @State private var apiBaseURL: String = ""
     @State private var apiKey: String = ""
+    @State private var inlineCLIAPIKey: String = ""
+    @State private var isSubmittingInlineCLIKey: Bool = false
 
     @State private var selectedTemplateID: String = "feature"
     @State private var projectName: String = ""
@@ -177,6 +179,23 @@ public struct OnboardingFlowView: View {
                 }
             }
         }
+        .onChange(of: step) { _, newStep in
+            if newStep == 1 {
+                store.cliAuthManager.refreshAllStatuses()
+            }
+        }
+        .sheet(isPresented: Binding(
+            get: { store.cliAuthManager.showSignInSheet },
+            set: { newValue in
+                if newValue {
+                    store.cliAuthManager.showSignInSheet = true
+                } else {
+                    store.cliAuthManager.dismissSignInSheet()
+                }
+            }
+        )) {
+            CLIAuthSignInSheet(authManager: store.cliAuthManager)
+        }
     }
 
     // MARK: - Step 1: Welcome & Meet Your Crew
@@ -291,8 +310,18 @@ public struct OnboardingFlowView: View {
 
     // MARK: - Step 2: Connect Intelligence & Local Readiness
 
+    private enum ProviderBadgeTone {
+        case positive
+        case warning
+        case checking
+        case neutral
+    }
+
     private var providerStep: some View {
         let env = store.environmentStatus
+        let selectedCLIProvider = CLIAuthProviderKind.from(backend: selectedBackend)
+        let selectedCLIDetected = selectedCLIProvider.map { isCLIDetected($0) } ?? false
+        let selectedCLIState = selectedCLIProvider.map { store.cliAuthManager.state(for: $0) }
 
         return VStack(alignment: .leading, spacing: 22) {
             VStack(alignment: .leading, spacing: 6) {
@@ -319,48 +348,64 @@ public struct OnboardingFlowView: View {
 
             // Provider cards
             VStack(spacing: 10) {
-                providerCard(
+                cliProviderCard(
                     kind: .claudeCLI,
+                    provider: .claude,
                     title: "Claude Code CLI",
                     subtitle: "Uses your local authenticated `claude` CLI directly.",
-                    badge: env.claudeCLIAvailable ? "Detected on this Mac" : "CLI not detected",
-                    badgePositive: env.claudeCLIAvailable
+                    detected: env.claudeCLIAvailable
                 )
-                providerCard(
+                cliProviderCard(
                     kind: .codexCLI,
+                    provider: .codex,
                     title: "Codex CLI",
                     subtitle: "Uses your local authenticated `codex` CLI.",
-                    badge: env.codexCLIAvailable ? "Detected on this Mac" : "CLI not detected",
-                    badgePositive: env.codexCLIAvailable
+                    detected: env.codexCLIAvailable
                 )
-                providerCard(
+                cliProviderCard(
+                    kind: .agyCLI,
+                    provider: .agy,
+                    title: "Antigravity CLI (agy)",
+                    subtitle: "Uses your local authenticated `agy` CLI (`agy --print --output-format json`).",
+                    detected: env.agyCLIAvailable
+                )
+                cliProviderCard(
                     kind: .piCLI,
+                    provider: .pi,
                     title: "Pi CLI (PyCLI)",
                     subtitle: "Uses your local `pi` coding agent CLI (`pi -p --mode json`) for fast multi-model workflows.",
-                    badge: env.piCLIAvailable ? "Detected on this Mac" : "CLI not detected",
-                    badgePositive: env.piCLIAvailable
+                    detected: env.piCLIAvailable
                 )
                 providerCard(
                     kind: .directHTTP,
                     title: "OpenAI / OpenRouter / Custom API",
                     subtitle: "Connect any OpenAI-compatible chat completions endpoint.",
                     badge: "API Key",
-                    badgePositive: !apiKey.isEmpty
+                    badgeTone: !apiKey.isEmpty ? .positive : .neutral
                 )
                 providerCard(
                     kind: .foundationModels,
                     title: "Apple Intelligence (On-Device)",
                     subtitle: "Private local inference via Apple FoundationModels.",
                     badge: env.foundationModelsSupported ? "Available" : "Requires macOS 26+",
-                    badgePositive: env.foundationModelsSupported
+                    badgeTone: env.foundationModelsSupported ? .positive : .neutral
                 )
                 providerCard(
                     kind: .mock,
                     title: "Offline Demo Mode",
                     subtitle: "Try multi-agent delegation, watchdogs, and UI animations right away with no API key.",
                     badge: "Always Ready",
-                    badgePositive: true
+                    badgeTone: .positive
                 )
+            }
+
+            // Inline one-click CLI sign-in callout when a detected CLI is not yet signed in
+            if let provider = selectedCLIProvider,
+               selectedCLIDetected,
+               let authState = selectedCLIState,
+               !authState.isSignedIn {
+                onboardingCLISignInCallout(for: provider, state: authState)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
             }
 
             if selectedBackend == .directHTTP {
@@ -411,6 +456,174 @@ public struct OnboardingFlowView: View {
             }
             .padding(.top, 6)
         }
+        .onAppear {
+            store.cliAuthManager.refreshAllStatuses()
+        }
+    }
+
+    private func isCLIDetected(_ provider: CLIAuthProviderKind) -> Bool {
+        let env = store.environmentStatus
+        switch provider {
+        case .claude: return env.claudeCLIAvailable
+        case .codex: return env.codexCLIAvailable
+        case .agy: return env.agyCLIAvailable
+        case .pi: return env.piCLIAvailable
+        }
+    }
+
+    private func cliProviderCard(
+        kind: LLMBackendKind,
+        provider: CLIAuthProviderKind,
+        title: String,
+        subtitle: String,
+        detected: Bool
+    ) -> some View {
+        let authState = store.cliAuthManager.state(for: provider)
+        let badgeInfo: (String, ProviderBadgeTone) = {
+            if !detected && !authState.isSignedIn {
+                return ("CLI not detected", .neutral)
+            }
+            switch authState {
+            case .signedIn:
+                return ("Signed In", .positive)
+            case .checking, .signingIn:
+                return (authState.badgeTitle, .checking)
+            case .notInstalled:
+                return ("CLI not detected", .neutral)
+            case .signedOut, .error, .unknown:
+                return ("Installed · Sign In Needed", .warning)
+            }
+        }()
+
+        let effectiveSubtitle: String = {
+            if case .signedIn(let identity) = authState {
+                let account = identity.email ?? identity.accountLabel ?? identity.summary
+                if let tier = identity.planTier, !tier.isEmpty {
+                    return "Signed in as \(account) · \(tier)"
+                }
+                return "Signed in as \(account)"
+            }
+            return subtitle
+        }()
+
+        return providerCard(
+            kind: kind,
+            title: title,
+            subtitle: effectiveSubtitle,
+            badge: badgeInfo.0,
+            badgeTone: badgeInfo.1
+        )
+    }
+
+    private func onboardingCLISignInCallout(for provider: CLIAuthProviderKind, state: CLIAuthState) -> some View {
+        let auth = store.cliAuthManager
+
+        return VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: "person.badge.key.fill")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(HelmAccent.primary)
+                    .frame(width: 34, height: 34)
+                    .background(HelmAccent.primarySoft, in: RoundedRectangle(cornerRadius: HelmRadius.control, style: .continuous))
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Sign in to \(provider.displayName)")
+                        .font(.callout.weight(.semibold))
+                        .foregroundStyle(HelmInk.primary)
+                    Text("`\(provider.commandName)` is installed on this Mac, but not signed in yet. Authenticate now so your crew can start immediately.")
+                        .font(.caption)
+                        .foregroundStyle(HelmInk.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Spacer(minLength: 8)
+
+                Button {
+                    auth.refreshStatus(for: provider)
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 12, weight: .medium))
+                }
+                .buttonStyle(HelmSecondaryButtonStyle())
+                .help("Re-check \(provider.displayName) login status")
+            }
+
+            if provider.supportsBrowserOAuth {
+                HStack(spacing: 10) {
+                    Button {
+                        auth.beginLogin(provider: provider, method: .browserOAuth)
+                    } label: {
+                        Label("Sign In via Browser…", systemImage: "safari")
+                            .fixedSize(horizontal: true, vertical: false)
+                    }
+                    .buttonStyle(HelmPrimaryButtonStyle())
+
+                    if provider.supportsDeviceCodeLogin {
+                        Button {
+                            auth.beginLogin(provider: provider, method: .deviceCode)
+                        } label: {
+                            Label("Device Code (VM)", systemImage: "rectangle.and.pencil.and.ellipsis")
+                                .fixedSize(horizontal: true, vertical: false)
+                        }
+                        .buttonStyle(HelmSecondaryButtonStyle())
+                    }
+
+                    Spacer(minLength: 0)
+
+                    Button("Open in Terminal") {
+                        auth.openTerminalLoginFallback(for: provider)
+                    }
+                    .buttonStyle(.borderless)
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(HelmInk.secondary)
+                }
+            } else if provider.supportsAPIKeyLogin {
+                let trimmedKey = inlineCLIAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+                HStack(spacing: 8) {
+                    SecureField("Paste API key for \(provider.displayName)…", text: $inlineCLIAPIKey)
+                        .textFieldStyle(.roundedBorder)
+
+                    Button {
+                        guard !trimmedKey.isEmpty else { return }
+                        isSubmittingInlineCLIKey = true
+                        let keyToSave = trimmedKey
+                        Task {
+                            await auth.submitAPIKeyLogin(provider: provider, apiKey: keyToSave)
+                            isSubmittingInlineCLIKey = false
+                            inlineCLIAPIKey = ""
+                        }
+                    } label: {
+                        if isSubmittingInlineCLIKey {
+                            ProgressView().controlSize(.mini)
+                        } else {
+                            Text("Save Key")
+                                .fixedSize(horizontal: true, vertical: false)
+                        }
+                    }
+                    .buttonStyle(HelmPrimaryButtonStyle())
+                    .disabled(trimmedKey.isEmpty || isSubmittingInlineCLIKey)
+
+                    Button("Open in Terminal") {
+                        auth.openTerminalLoginFallback(for: provider)
+                    }
+                    .buttonStyle(HelmSecondaryButtonStyle())
+                }
+            } else {
+                HStack(spacing: 10) {
+                    Button {
+                        auth.openTerminalLoginFallback(for: provider)
+                    } label: {
+                        Label("Open Login in Terminal", systemImage: "terminal")
+                            .fixedSize(horizontal: true, vertical: false)
+                    }
+                    .buttonStyle(HelmPrimaryButtonStyle())
+
+                    Spacer(minLength: 0)
+                }
+            }
+        }
+        .padding(14)
+        .helmCard(cornerRadius: HelmRadius.panel, accentBorder: HelmAccent.primary.opacity(0.38))
     }
 
     private func readinessChip(ok: Bool, label: String) -> some View {
@@ -433,7 +646,7 @@ public struct OnboardingFlowView: View {
         title: String,
         subtitle: String,
         badge: String,
-        badgePositive: Bool
+        badgeTone: ProviderBadgeTone
     ) -> some View {
         let isSelected = selectedBackend == kind
 
@@ -454,22 +667,57 @@ public struct OnboardingFlowView: View {
                     Text(subtitle)
                         .font(.caption)
                         .foregroundStyle(HelmInk.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
                 }
 
-                Spacer()
+                Spacer(minLength: 10)
 
-                Text(badge)
-                    .font(.caption.weight(.medium))
-                    .foregroundStyle(badgePositive ? HelmSemantic.steady : HelmInk.muted)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 3)
-                    .background((badgePositive ? HelmSemantic.steadySoft : HelmSurface.well), in: Capsule())
+                providerBadgeView(label: badge, tone: badgeTone)
             }
             .padding(14)
             .helmCard(cornerRadius: HelmRadius.panel, isSelected: isSelected)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+    }
+
+    private func providerBadgeView(label: String, tone: ProviderBadgeTone) -> some View {
+        let fg: Color
+        let bg: Color
+        switch tone {
+        case .positive:
+            fg = HelmSemantic.steady
+            bg = HelmSemantic.steadySoft
+        case .warning:
+            fg = HelmSemantic.attention
+            bg = HelmSemantic.attentionSoft
+        case .checking:
+            fg = HelmSemantic.thinking
+            bg = HelmSemantic.thinkingSoft
+        case .neutral:
+            fg = HelmInk.muted
+            bg = HelmSurface.well
+        }
+
+        return HStack(spacing: 5) {
+            if tone == .checking {
+                ProgressView()
+                    .controlSize(.mini)
+            } else if tone == .positive || tone == .warning {
+                Circle()
+                    .fill(fg)
+                    .frame(width: 6, height: 6)
+            }
+            Text(label)
+                .font(.caption.weight(.medium))
+                .foregroundStyle(fg)
+                .lineLimit(1)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 3)
+        .background(bg, in: Capsule())
+        .fixedSize(horizontal: true, vertical: false)
     }
 
     // MARK: - Step 3: Launch First Project & Crew

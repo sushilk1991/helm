@@ -90,6 +90,23 @@ public enum HeadlessSnapshotRunner {
                 to: outputURL
             )
         }
+
+        // Optional Settings (Accounts & CLIs) snapshots for visual QA (opt-in so standard E2E width checks stay >= 900)
+        if ProcessInfo.processInfo.environment["HELM_SNAPSHOT_SETTINGS"] == "1" {
+            for isDark in [true, false] {
+                let settingsView = SettingsSheetView(store: steadyStore)
+                    .environment(\.helmReduceMotion, reduceMotion)
+                    .environment(\.helmWindowOccluded, false)
+                    .preferredColorScheme(isDark ? .dark : .light)
+                let name = isDark ? "helm_dark_settings\(suffix).png" : "helm_light_settings\(suffix).png"
+                try renderOffscreenPNG(
+                    rootView: settingsView,
+                    size: CGSize(width: 720, height: 660),
+                    isDark: isDark,
+                    to: snapshotDirectory.appendingPathComponent(name)
+                )
+            }
+        }
     }
 
     private static func buildSeededStore(withException: Bool, reduceMotion: Bool) async throws -> HelmWorkspaceStore {

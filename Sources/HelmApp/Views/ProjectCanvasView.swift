@@ -35,6 +35,17 @@ public struct ProjectCanvasView: View {
                                     .font(.callout)
                                     .foregroundStyle(HelmInk.primary)
                                 Spacer()
+                                if isAuthRequiredText(err) {
+                                    Button {
+                                        store.openSettingsToAuth(
+                                            highlighting: inferredAuthProvider(from: err, agent: nil)
+                                        )
+                                    } label: {
+                                        Label("Sign In in Settings…", systemImage: "person.badge.key.fill")
+                                            .fixedSize(horizontal: true, vertical: false)
+                                    }
+                                    .buttonStyle(HelmPrimaryButtonStyle())
+                                }
                                 Button("Dismiss") {
                                     store.bannerErrorMessage = nil
                                 }
@@ -48,20 +59,7 @@ public struct ProjectCanvasView: View {
                         if !store.selectedProjectOpenExceptions.isEmpty {
                             VStack(spacing: HelmSpace.m) {
                                 ForEach(store.selectedProjectOpenExceptions) { alert in
-                                    ExceptionBannerView(
-                                        alert: alert,
-                                        offendingAgent: store.selectedProjectAgents.first(where: { $0.id == alert.agentID }),
-                                        onResolve: { resolution in
-                                            Task {
-                                                await store.resolveException(alert, resolution: resolution)
-                                            }
-                                        },
-                                        onInspectAgent: { agentID in
-                                            withAnimation(effectiveReduceMotion ? HelmMotion.exit : HelmMotion.state) {
-                                                store.inspectAgent(agentID)
-                                            }
-                                        }
-                                    )
+                                    exceptionCard(for: alert)
                                 }
                             }
                             .transition(
@@ -94,6 +92,108 @@ public struct ProjectCanvasView: View {
                 emptyWorkspaceView
             }
         }
+    }
+
+    // MARK: - Exception Card & CLI Auth Recovery Action
+
+    private func exceptionCard(for alert: ExceptionAlert) -> some View {
+        let offendingAgent = store.selectedProjectAgents.first(where: { $0.id == alert.agentID })
+        let needsAuth = isAuthRequiredException(alert)
+        let matchedProvider = inferredAuthProvider(
+            from: "\(alert.title) \(alert.diagnosticSummary)",
+            agent: offendingAgent
+        )
+
+        return VStack(spacing: HelmSpace.s) {
+            ExceptionBannerView(
+                alert: alert,
+                offendingAgent: offendingAgent,
+                onResolve: { resolution in
+                    Task {
+                        await store.resolveException(alert, resolution: resolution)
+                    }
+                },
+                onInspectAgent: { agentID in
+                    withAnimation(effectiveReduceMotion ? HelmMotion.exit : HelmMotion.state) {
+                        store.inspectAgent(agentID)
+                    }
+                }
+            )
+
+            if needsAuth {
+                HStack(spacing: HelmSpace.m) {
+                    Image(systemName: "person.badge.key.fill")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(HelmAccent.primary)
+                        .frame(width: 28, height: 28)
+                        .background(HelmAccent.primarySoft, in: RoundedRectangle(cornerRadius: HelmRadius.badge, style: .continuous))
+
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(
+                            matchedProvider.map { "\($0.displayName) sign-in required" }
+                                ?? "CLI sign-in required"
+                        )
+                        .font(.callout.weight(.semibold))
+                        .foregroundStyle(HelmInk.primary)
+
+                        Text("Authenticate in Helm Settings, then click Retry above to resume automatically.")
+                            .font(.caption)
+                            .foregroundStyle(HelmInk.secondary)
+                            .lineLimit(2)
+                    }
+
+                    Spacer(minLength: HelmSpace.m)
+
+                    Button {
+                        store.openSettingsToAuth(highlighting: matchedProvider)
+                    } label: {
+                        Label("Sign In in Settings…", systemImage: "arrow.up.right.circle.fill")
+                            .fixedSize(horizontal: true, vertical: false)
+                    }
+                    .buttonStyle(HelmPrimaryButtonStyle())
+                }
+                .padding(.horizontal, HelmSpace.xl)
+                .padding(.vertical, HelmSpace.l)
+                .background(HelmSurface.elevated, in: RoundedRectangle(cornerRadius: HelmRadius.panel, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: HelmRadius.panel, style: .continuous)
+                        .strokeBorder(HelmAccent.primary.opacity(0.38), lineWidth: 1.0)
+                )
+            }
+        }
+    }
+
+    private func isAuthRequiredException(_ alert: ExceptionAlert) -> Bool {
+        isAuthRequiredText(alert.title) || isAuthRequiredText(alert.diagnosticSummary)
+    }
+
+    private func isAuthRequiredText(_ text: String) -> Bool {
+        text.localizedCaseInsensitiveContains("Sign-In Required")
+            || text.localizedCaseInsensitiveContains("not logged in")
+            || text.localizedCaseInsensitiveContains("auth login")
+            || text.localizedCaseInsensitiveContains("authentication required")
+    }
+
+    private func inferredAuthProvider(from text: String, agent: AgentProfile?) -> CLIAuthProviderKind? {
+        if let agent, let provider = CLIAuthProviderKind.from(backend: agent.backend) {
+            return provider
+        }
+        if text.localizedCaseInsensitiveContains("claude") {
+            return .claude
+        }
+        if text.localizedCaseInsensitiveContains("codex") {
+            return .codex
+        }
+        if text.localizedCaseInsensitiveContains("antigravity")
+            || text.localizedCaseInsensitiveContains("agy") {
+            return .agy
+        }
+        if text.localizedCaseInsensitiveContains("pi cli")
+            || text.localizedCaseInsensitiveContains("pycli")
+            || text.localizedCaseInsensitiveContains("`pi`") {
+            return .pi
+        }
+        return nil
     }
 
     // MARK: - Calm Project Header
@@ -222,6 +322,48 @@ public struct ProjectCanvasView: View {
                         .font(.caption)
                         .monospacedDigit()
                         .foregroundStyle(HelmInk.secondary)
+                }
+
+                // Live Activity Ticker — crystal-clear visibility into what's actively running right now
+                if project.status == .running && openCount == 0 {
+                    let activeTasks = store.selectedProjectActiveTasks
+                    let latest = store.selectedProjectLatestEvent
+                    HStack(spacing: 8) {
+                        ProgressView()
+                            .controlSize(.mini)
+                        if let firstActive = activeTasks.first,
+                           let worker = store.selectedProjectAgents.first(where: { $0.id == firstActive.assignedAgentID }) {
+                            Text("Working now:")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(HelmSemantic.steady)
+                            Text("\(worker.name) (\(worker.backend.displayName)) — \(firstActive.title)")
+                                .font(.caption)
+                                .foregroundStyle(HelmInk.primary)
+                                .lineLimit(1)
+                            if activeTasks.count > 1 {
+                                Text("+\(activeTasks.count - 1) more")
+                                    .font(.caption.weight(.medium))
+                                    .foregroundStyle(HelmInk.secondary)
+                            }
+                        } else if let latest {
+                            Text("Orchestrator active:")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(HelmSemantic.steady)
+                            Text(latest.summary.replacingOccurrences(of: "STEADY_OK: ", with: ""))
+                                .font(.caption)
+                                .foregroundStyle(HelmInk.primary)
+                                .lineLimit(1)
+                        } else {
+                            Text("Orchestrator planning next steps…")
+                                .font(.caption)
+                                .foregroundStyle(HelmInk.secondary)
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
+                    .background(HelmSemantic.steadySoft, in: RoundedRectangle(cornerRadius: HelmRadius.control, style: .continuous))
+                    .padding(.top, 4)
                 }
             }
         }
@@ -363,84 +505,134 @@ public struct ProjectCanvasView: View {
         let isSelected = store.isInspectorVisible && store.selectedAgent?.id == agent.id
         let isHovered = hoveredAgentID == agent.id
         let isLead = agent.role == .orchestrator
+        let currentTask = store.activeTask(for: agent.id)
+        let isActivelyWorking = currentTask != nil || agent.activityState == .thinking || agent.activityState == .executing || agent.activityState == .browsing
 
-        return Button {
-            withAnimation(effectiveReduceMotion ? HelmMotion.exit : HelmMotion.state) {
-                store.inspectAgent(agent.id)
-            }
-        } label: {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack(alignment: .top, spacing: 12) {
-                    AgentCharacterCanvas(
-                        seed: agent.characterSeed,
-                        state: agent.activityState,
-                        size: 56,
-                        showStageBacking: true,
-                        interactive: false
-                    )
+        return VStack(alignment: .leading, spacing: 11) {
+            HStack(alignment: .top, spacing: 12) {
+                AgentCharacterCanvas(
+                    seed: agent.characterSeed,
+                    state: agent.activityState,
+                    size: 56,
+                    showStageBacking: true,
+                    interactive: false
+                )
 
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack(spacing: 6) {
-                            Text(agent.name)
-                                .font(.body.weight(.semibold))
-                                .foregroundStyle(HelmInk.primary)
-                                .lineLimit(1)
-
-                            if isLead {
-                                Text("Lead")
-                                    .font(.system(size: 10, weight: .semibold))
-                                    .foregroundStyle(HelmAccent.brass)
-                                    .padding(.horizontal, 6)
-                                    .padding(.vertical, 1.5)
-                                    .background(HelmAccent.brassSoft, in: Capsule())
-                            }
-                        }
-
-                        Text("\(agent.role.displayName) · \(agent.backend.displayName)")
-                            .font(.caption)
-                            .foregroundStyle(HelmInk.secondary)
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 6) {
+                        Text(agent.name)
+                            .font(.body.weight(.semibold))
+                            .foregroundStyle(HelmInk.primary)
                             .lineLimit(1)
 
-                        HStack(spacing: 6) {
-                            AgentStatusBadge(state: agent.activityState)
+                        if isLead {
+                            Text("Lead")
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(HelmAccent.brass)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 1.5)
+                                .background(HelmAccent.brassSoft, in: Capsule())
+                        }
 
+                        Spacer(minLength: 0)
+
+                        // Quick Per-Agent CLI Switcher directly on the card
+                        Menu {
+                            ForEach(LLMBackendKind.allCases, id: \.self) { kind in
+                                Button {
+                                    Task {
+                                        try? await store.updateAgent(agentID: agent.id, backend: kind)
+                                    }
+                                } label: {
+                                    if agent.backend == kind {
+                                        Label(kind.displayName, systemImage: "checkmark")
+                                    } else {
+                                        Text(kind.displayName)
+                                    }
+                                }
+                            }
+                        } label: {
                             HStack(spacing: 3) {
-                                Image(systemName: agent.personality.symbolName)
-                                    .font(.system(size: 9))
-                                Text(agent.personality.displayName)
+                                Text(agent.backend.displayName)
                                     .font(.system(size: 10, weight: .medium))
-                                    .lineLimit(1)
+                                Image(systemName: "chevron.up.chevron.down")
+                                    .font(.system(size: 8))
                             }
                             .foregroundStyle(HelmInk.secondary)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2.5)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 3)
                             .background(HelmSurface.well, in: Capsule())
+                            .overlay(Capsule().strokeBorder(HelmSurface.line, lineWidth: 0.75))
                         }
-                        .padding(.top, 2)
+                        .menuStyle(.borderlessButton)
+                        .menuIndicator(.hidden)
+                        .fixedSize()
+                        .help("Switch CLI / AI engine for \(agent.name)")
                     }
 
-                    Spacer(minLength: 0)
-                }
+                    Text(agent.role.displayName)
+                        .font(.caption)
+                        .foregroundStyle(HelmInk.secondary)
+                        .lineLimit(1)
 
+                    HStack(spacing: 6) {
+                        AgentStatusBadge(state: agent.activityState)
+
+                        HStack(spacing: 3) {
+                            Image(systemName: agent.personality.symbolName)
+                                .font(.system(size: 9))
+                            Text(agent.personality.displayName)
+                                .font(.system(size: 10, weight: .medium))
+                                .lineLimit(1)
+                        }
+                        .foregroundStyle(HelmInk.secondary)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2.5)
+                        .background(HelmSurface.well, in: Capsule())
+                    }
+                    .padding(.top, 2)
+                }
+            }
+
+            if let currentTask {
+                HStack(spacing: 6) {
+                    ProgressView()
+                        .controlSize(.mini)
+                    Text(currentTask.title)
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(HelmInk.primary)
+                        .lineLimit(1)
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 5)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(HelmAccent.primarySoft, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+            } else {
                 Text(agent.goal)
                     .font(.caption)
                     .foregroundStyle(HelmInk.secondary)
                     .lineLimit(2)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .padding(14)
-            .helmCard(
-                cornerRadius: HelmRadius.card,
-                isSelected: isSelected,
-                accentBorder: agent.activityState == .exception
-                    ? HelmSemantic.attention.opacity(0.55)
-                    : (isLead && !isSelected ? HelmAccent.brass.opacity(0.28) : nil)
-            )
-            .offset(y: isHovered && !effectiveReduceMotion ? -2 : 0)
-            .animation(HelmMotion.bouncy, value: isHovered)
-            .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .padding(14)
+        .helmCard(
+            cornerRadius: HelmRadius.card,
+            isSelected: isSelected,
+            accentBorder: agent.activityState == .exception
+                ? HelmSemantic.attention.opacity(0.55)
+                : (isActivelyWorking && !isSelected
+                    ? HelmSemantic.steady.opacity(0.40)
+                    : (isLead && !isSelected ? HelmAccent.brass.opacity(0.28) : nil))
+        )
+        .offset(y: isHovered && !effectiveReduceMotion ? -2 : 0)
+        .animation(HelmMotion.bouncy, value: isHovered)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            withAnimation(effectiveReduceMotion ? HelmMotion.exit : HelmMotion.state) {
+                store.inspectAgent(agent.id)
+            }
+        }
         .onHover { hovering in
             hoveredAgentID = hovering ? agent.id : (hoveredAgentID == agent.id ? nil : hoveredAgentID)
         }

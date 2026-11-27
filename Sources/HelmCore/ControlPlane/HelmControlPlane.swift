@@ -268,6 +268,37 @@ public final class HelmControlPlane: Sendable {
     public func resolveException(exceptionID: UUID, resolution: ExceptionResolution) async throws -> ExceptionAlert {
         let gate = HumanDecisionGate(database: database)
         let resolved = try await gate.resolve(exceptionID: exceptionID, resolution: resolution)
+
+        // If operator explicitly approved an unauthorized capability request, grant the requested capability
+        // so resuming the agent doesn't immediately re-trip the exact same hold.
+        if resolution == .approve,
+           let agentID = resolved.agentID,
+           resolved.title.localizedCaseInsensitiveContains("Unauthorized Capability"),
+           var agent = try await database.fetchAgent(id: agentID) {
+            let lower = resolved.summary.lowercased()
+            var changed = false
+            if lower.contains("codeexec") || lower.contains("run_command") {
+                agent.capabilities.insert(.codeExec)
+                changed = true
+            }
+            if lower.contains("browser") || lower.contains("browser_act") {
+                agent.capabilities.insert(.browser)
+                agent.capabilities.insert(.ocr)
+                changed = true
+            }
+            if changed {
+                agent.updatedAt = Date()
+                try await database.updateAgent(agent)
+                try await database.appendEvent(RunEvent(
+                    projectID: resolved.projectID,
+                    agentID: agent.id,
+                    kind: .agentStateChanged,
+                    summary: "Granted approved capability to \(agent.name)",
+                    trustLevel: .humanAuthoritative
+                ))
+            }
+        }
+
         try await refreshSnapshots(projectID: resolved.projectID)
         return resolved
     }

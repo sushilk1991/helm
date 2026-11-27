@@ -45,10 +45,16 @@ struct HelmSwiftUIApp: App {
             }
 
             CommandGroup(replacing: .appSettings) {
-                Button("Setup & AI Provider…") {
-                    store.reopenOnboarding()
+                Button("Settings & AI CLIs…") {
+                    store.openSettings()
                 }
                 .keyboardShortcut(",", modifiers: .command)
+
+                Button("Run Guided Setup…") {
+                    store.reopenOnboarding()
+                }
+
+                Divider()
 
                 Button("Check for Updates…") {
                     store.updateManager.showUpdatePopover = true

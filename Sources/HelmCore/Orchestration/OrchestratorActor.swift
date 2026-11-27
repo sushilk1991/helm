@@ -175,6 +175,7 @@ public actor OrchestratorActor {
                     .mock: mock,
                     .claudeCLI: mock,
                     .codexCLI: mock,
+                    .agyCLI: mock,
                     .piCLI: mock,
                     .directHTTP: mock,
                     .foundationModels: mock,
@@ -189,6 +190,7 @@ public actor OrchestratorActor {
                     .mock: mock,
                     .claudeCLI: mock,
                     .codexCLI: mock,
+                    .agyCLI: mock,
                     .piCLI: mock,
                     .directHTTP: mock,
                     .foundationModels: mock,
@@ -200,6 +202,7 @@ public actor OrchestratorActor {
                     .mock: mock,
                     .claudeCLI: mock,
                     .codexCLI: mock,
+                    .agyCLI: mock,
                     .piCLI: mock,
                     .directHTTP: mock,
                     .foundationModels: mock,
@@ -660,7 +663,8 @@ public actor OrchestratorActor {
         let targetAgents = workers.isEmpty ? agents : workers
 
         let rosterLines = targetAgents.map { agent in
-            "AGENT|\(agent.id.uuidString)|\(agent.name)|\(agent.role.rawValue)|\(agent.goal)"
+            let caps = agent.capabilities.map(\.rawValue).sorted().joined(separator: ",")
+            return "AGENT|\(agent.id.uuidString)|\(agent.name)|\(agent.role.rawValue)|caps:[\(caps)]|\(agent.goal)"
         }.joined(separator: "\n")
 
         let backendToUse: LLMBackendKind
@@ -683,7 +687,7 @@ public actor OrchestratorActor {
             agentID: orchestrator?.id ?? project.id,
             projectID: project.id,
             stepIndex: 0,
-            systemPrompt: "Role: orchestrator\nPersonality: \(personalityDirective)\nDecompose the project goal into concrete tasks for the available specialized agents. Reply strictly with JSON {\"tasks\":[{\"temp_id\":\"t1\",\"title\":\"...\",\"instructions\":\"...\",\"assigned_agent_id\":\"<uuid>\",\"waiting_on_temp_ids\":[]}]}",
+            systemPrompt: "Role: orchestrator\nPersonality: \(personalityDirective)\nDecompose the project goal into concrete tasks for the available specialized agents. Match each task strictly to an agent's capabilities (assign shell/repo/code tasks to agents with codeExec, web browsing tasks to agents with browser) and parallelize independent starter tasks with empty waiting_on_temp_ids whenever possible. Reply strictly with JSON {\"tasks\":[{\"temp_id\":\"t1\",\"title\":\"...\",\"instructions\":\"...\",\"assigned_agent_id\":\"<uuid>\",\"waiting_on_temp_ids\":[]}]}",
             userPrompt: "DECOMPOSE_GOAL\nProject: \(project.name)\nGoal: \(project.goal)\n\(rosterLines)",
             timeoutSeconds: project.budgetPolicy.stepTimeoutSeconds
         )

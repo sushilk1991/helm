@@ -144,6 +144,7 @@ public struct LLMProviderRegistry: Sendable {
             .mock: resolvedMock,
             .claudeCLI: ClaudeCLIProvider(),
             .codexCLI: CodexCLIProvider(),
+            .agyCLI: AgyCLIProvider(),
             .piCLI: PiCLIProvider(),
             .directHTTP: DirectHTTPProvider(environment: environment),
             .foundationModels: FoundationModelsProvider(),

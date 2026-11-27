@@ -42,6 +42,9 @@ public struct HarborInteractiveShellView: View {
                 AddAgentSheet(store: store, projectID: project.id)
             }
         }
+        .sheet(isPresented: $store.showSettingsSheet) {
+            SettingsSheetView(store: store)
+        }
         .frame(minWidth: 980, minHeight: 640)
     }
 }

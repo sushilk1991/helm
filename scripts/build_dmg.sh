@@ -58,6 +58,33 @@ fi
 codesign "${SIGN_ARGS[@]}" "${STAGE_DIR}/Helm.app"
 codesign --verify --deep --strict "${STAGE_DIR}/Helm.app"
 
+notarize_and_staple() {
+    local target="$1"
+    local submit_path="$target"
+    if [[ -d "$target" ]]; then
+        submit_path="${WORK_DIR}/$(basename "$target").zip"
+        ditto -c -k --keepParent "$target" "$submit_path"
+    fi
+    if [[ -n "${HELM_NOTARY_PROFILE:-}" ]]; then
+        xcrun notarytool submit "$submit_path" --keychain-profile "${HELM_NOTARY_PROFILE}" --wait
+    elif [[ -n "${HELM_NOTARY_KEY:-}" && -n "${HELM_NOTARY_KEY_ID:-}" && -n "${HELM_NOTARY_ISSUER:-}" ]]; then
+        xcrun notarytool submit "$submit_path" \
+            --key "${HELM_NOTARY_KEY}" \
+            --key-id "${HELM_NOTARY_KEY_ID}" \
+            --issuer "${HELM_NOTARY_ISSUER}" \
+            --wait
+    else
+        return 0
+    fi
+    xcrun stapler staple "$target"
+    xcrun stapler validate "$target"
+}
+
+if [[ "$SIGN_IDENTITY" != "-" && ( -n "${HELM_NOTARY_PROFILE:-}" || ( -n "${HELM_NOTARY_KEY:-}" && -n "${HELM_NOTARY_KEY_ID:-}" && -n "${HELM_NOTARY_ISSUER:-}" ) ) ]]; then
+    echo "==> Notarizing and stapling Helm.app..."
+    notarize_and_staple "${STAGE_DIR}/Helm.app"
+fi
+
 echo "==> Creating compressed DMG at ${DMG_PATH}..."
 rm -f "${DMG_PATH}" "${SHA_PATH}"
 
@@ -89,7 +116,17 @@ else
         "${DMG_PATH}"
 fi
 
-echo "==> Verifying DMG integrity and checksum..."
+echo "==> Verifying DMG integrity..."
+if [[ "$SIGN_IDENTITY" != "-" ]]; then
+    echo "==> Signing DMG (identity: ${SIGN_IDENTITY})..."
+    codesign --force --sign "$SIGN_IDENTITY" --timestamp "${DMG_PATH}"
+    codesign --verify --verbose=2 "${DMG_PATH}"
+    if [[ -n "${HELM_NOTARY_PROFILE:-}" || ( -n "${HELM_NOTARY_KEY:-}" && -n "${HELM_NOTARY_KEY_ID:-}" && -n "${HELM_NOTARY_ISSUER:-}" ) ]]; then
+        echo "==> Notarizing and stapling DMG..."
+        notarize_and_staple "${DMG_PATH}"
+    fi
+fi
+
 hdiutil verify "${DMG_PATH}"
 (cd "${DIST_DIR}" && shasum -a 256 "${DMG_NAME}" > "${DMG_NAME}.sha256")
 

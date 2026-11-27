@@ -24,18 +24,18 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full v1 architecture 
 
 ## Download (macOS Apple Silicon)
 
-Download the pre-built **`Helm-0.1.0-arm64.dmg`** installer from [GitHub Releases](https://github.com/sushilk1991/helm/releases/latest):
+Download the **Developer ID signed & Apple-notarized** **`Helm-0.1.0-arm64.dmg`** installer from [GitHub Releases](https://github.com/sushilk1991/helm/releases/latest):
 
 1. Open `Helm-0.1.0-arm64.dmg` and drag **Helm.app** into **Applications**.
-2. Because community release builds are ad-hoc signed with `com.apple.security.virtualization` (not notarized with a paid Apple Developer ID), clear the browser quarantine attribute once before first launch if macOS Gatekeeper blocks it:
-   ```bash
-   xattr -cr /Applications/Helm.app
-   open /Applications/Helm.app
-   ```
+2. Launch **Helm** from Applications (macOS 15.0+ on Apple Silicon `arm64`).
 
-To build the DMG locally from source:
+To build (and optionally sign & notarize) the DMG locally from source:
 ```bash
 bash scripts/build_dmg.sh
+# Optional Developer ID signing + notarization:
+# HELM_SIGN_IDENTITY="Developer ID Application: ..." \
+#   HELM_NOTARY_KEY=/path/to/AuthKey.p8 HELM_NOTARY_KEY_ID=... HELM_NOTARY_ISSUER=... \
+#   bash scripts/build_dmg.sh
 # Output: dist/Helm-0.1.0-arm64.dmg (+ .sha256)
 ```
 

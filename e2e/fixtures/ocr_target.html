@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>OCR TARGETS</title>
+  <style>
+    body {
+      font-family: -apple-system, Helvetica, Arial, sans-serif;
+      background: #FFFFFF;
+      color: #111111;
+      font-size: 20px;
+      line-height: 1.5;
+      margin: 40px;
+    }
+    .target-btn {
+      display: block;
+      width: 260px;
+      height: 56px;
+      margin: 36px 0;
+      font-size: 22px;
+      font-weight: 700;
+      background: #111111;
+      color: #FFFFFF;
+      border: none;
+      cursor: pointer;
+    }
+    #ocr-status {
+      margin-top: 32px;
+      font-size: 24px;
+      font-weight: 700;
+    }
+  </style>
+</head>
+<body>
+  <h1>OCR TARGETS</h1>
+  <button id="alpha-btn" class="target-btn" type="button" onclick="document.getElementById('ocr-status').textContent='STATE: ALPHA CLICKED OK'">ALPHA TARGET</button>
+  <button id="bravo-btn" class="target-btn" type="button" onclick="document.getElementById('ocr-status').textContent='STATE: BRAVO CLICKED OK'">BRAVO ACTION</button>
+  <button id="charlie-btn" class="target-btn" type="button" onclick="document.getElementById('ocr-status').textContent='STATE: CHARLIE CLICKED OK'">CHARLIE VERIFY</button>
+  <div id="ocr-status">STATE: WAITING</div>
+</body>
+</html>

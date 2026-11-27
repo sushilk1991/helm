@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>DISPATCH FORM</title>
+  <style>
+    body {
+      font-family: -apple-system, Helvetica, Arial, sans-serif;
+      background: #FFFFFF;
+      color: #111111;
+      font-size: 20px;
+      line-height: 1.5;
+      margin: 40px;
+    }
+    .field {
+      margin-bottom: 24px;
+    }
+    label {
+      display: block;
+      font-weight: 700;
+      margin-bottom: 8px;
+    }
+    input {
+      width: 280px;
+      height: 44px;
+      font-size: 20px;
+      border: 2px solid #111111;
+      padding: 4px 10px;
+      color: #111111;
+      background: #FFFFFF;
+    }
+    button {
+      width: 220px;
+      height: 52px;
+      font-size: 22px;
+      font-weight: 700;
+      background: #111111;
+      color: #FFFFFF;
+      border: none;
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+  <h1>DISPATCH FORM</h1>
+  <form action="/result" method="get">
+    <div class="field">
+      <label for="code">CODE</label>
+      <input id="code" name="code" type="text" autocomplete="off">
+    </div>
+    <div class="field">
+      <label for="note">NOTE</label>
+      <input id="note" name="note" type="text" autocomplete="off">
+    </div>
+    <button id="submit-btn" type="submit">SUBMIT ORDER</button>
+  </form>
+</body>
+</html>

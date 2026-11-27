@@ -1,0 +1,54 @@
+# macOS & IDE state
+.DS_Store
+xcuserdata/
+*.xcuserstate
+
+# SwiftPM & Xcode build outputs
+.build/
+.swiftpm/
+build/
+DerivedData/
+DerivedData*/
+*.xcodeproj/
+*.xcworkspace/
+
+# Helm runtime state, caches & agent metadata
+.helm/
+.helm-vm/
+.cache/
+.agents/
+
+# Local databases
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite-journal
+*.db
+*.db-wal
+*.db-shm
+
+# Secrets, env files & signing material
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.mobileprovision
+*.cer
+*.crt
+
+# Python & E2E artifacts
+__pycache__/
+*.pyc
+.venv/
+venv/
+e2e/.venv/
+e2e/.bin/
+e2e/.reports/
+e2e/.tmp/
+
+# Temporary screenshots (keep tracked app icons and E2E fixtures)
+*.png
+!Resources/Assets.xcassets/AppIcon.appiconset/*.png
+!e2e/fixtures/*.png

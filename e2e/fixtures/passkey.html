@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>PASSKEY PROBE</title>
+  <style>
+    body {
+      font-family: -apple-system, Helvetica, Arial, sans-serif;
+      background: #FFFFFF;
+      color: #111111;
+      font-size: 22px;
+      font-weight: 700;
+      margin: 40px;
+    }
+  </style>
+</head>
+<body>
+  <h1>PASSKEY PROBE</h1>
+  <div id="passkey-status">PASSKEY_PENDING</div>
+  <script>
+    (async function () {
+      const el = document.getElementById('passkey-status');
+      try {
+        if (!navigator.credentials || typeof navigator.credentials.create !== 'function') {
+          el.textContent = 'PASSKEY_REFUSED_CLEANLY';
+          return;
+        }
+        await navigator.credentials.create({
+          publicKey: {
+            challenge: new Uint8Array(16),
+            rp: { name: 'Test' },
+            user: { id: new Uint8Array(8), name: 'u', displayName: 'U' },
+            pubKeyCredParams: [{ type: 'public-key', alg: -7 }]
+          }
+        });
+        el.textContent = 'PASSKEY_UNEXPECTED_OK';
+      } catch (err) {
+        el.textContent = 'PASSKEY_REFUSED_CLEANLY';
+      }
+    })();
+  </script>
+</body>
+</html>

@@ -3,7 +3,7 @@ import PackageDescription
 
 let package = Package(
     name: "Helm",
-    platforms: [.macOS(.v27)],
+    platforms: [.macOS(.v15)],
     products: [
         .library(name: "HelmCore", targets: ["HelmCore"]),
         .library(name: "HelmIsolation", targets: ["HelmIsolation"]),

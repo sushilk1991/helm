@@ -16,6 +16,9 @@ public struct FoundationModelsProvider: LLMProvider, Sendable {
 
     public func complete(_ request: LLMRequest) async throws -> LLMResponse {
         #if canImport(FoundationModels)
+        guard #available(macOS 26.0, *) else {
+            throw LLMProviderError.modelUnavailable("Apple FoundationModels requires macOS 26.0 or newer")
+        }
         let start = CFAbsoluteTimeGetCurrent()
         let model = SystemLanguageModel.default
         guard case .available = model.availability else {

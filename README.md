@@ -22,9 +22,28 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full v1 architecture 
 
 ---
 
+## Download (macOS Apple Silicon)
+
+Download the pre-built **`Helm-0.1.0-arm64.dmg`** installer from [GitHub Releases](https://github.com/sushilk1991/helm/releases/latest):
+
+1. Open `Helm-0.1.0-arm64.dmg` and drag **Helm.app** into **Applications**.
+2. Because community release builds are ad-hoc signed with `com.apple.security.virtualization` (not notarized with a paid Apple Developer ID), clear the browser quarantine attribute once before first launch if macOS Gatekeeper blocks it:
+   ```bash
+   xattr -cr /Applications/Helm.app
+   open /Applications/Helm.app
+   ```
+
+To build the DMG locally from source:
+```bash
+bash scripts/build_dmg.sh
+# Output: dist/Helm-0.1.0-arm64.dmg (+ .sha256)
+```
+
+---
+
 ## Requirements
 
-- **OS & Toolchain:** macOS 27 (Apple Silicon `arm64` recommended for `Virtualization.framework`), Swift 6.4 / Xcode
+- **OS & Toolchain:** macOS 15.0+ (Apple Silicon `arm64` recommended for `Virtualization.framework`; on-device Apple `FoundationModels` available on macOS 26+), Swift 6.4 / Xcode
 - **App Bundle Generation:** [XcodeGen](https://github.com/yonaskolb/XcodeGen) (`xcodegen`) for generating `Helm.xcodeproj` from `project.yml`
 - **Headless Browser (optional, required for live browser E2E):** Google Chrome installed at `/Applications/Google Chrome.app` (or set `HELM_CHROME_PATH`)
 - **Python 3:** Required for running the E2E test harness (`e2e/run_e2e.sh`)

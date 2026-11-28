@@ -14,18 +14,20 @@ public struct HarborInteractiveShellView: View {
                 OnboardingFlowView(store: store)
                     .transition(.opacity.combined(with: .scale(scale: 0.985)))
             } else {
-                NavigationSplitView {
+                HStack(spacing: 0) {
                     ProjectSidebarView(store: store)
-                        .navigationSplitViewColumnWidth(min: 224, ideal: 244, max: 272)
-                } detail: {
-                    HStack(spacing: 0) {
-                        ProjectCanvasView(store: store)
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-                        if store.isInspectorVisible && store.selectedProject != nil {
-                            DetailInspectorView(store: store)
-                                .transition(.move(edge: .trailing).combined(with: .opacity))
-                        }
+                    Rectangle()
+                        .fill(HelmSurface.line)
+                        .frame(width: 1)
+
+                    ProjectCanvasView(store: store)
+                        .frame(minWidth: 0, maxWidth: .infinity, maxHeight: .infinity)
+                        .clipped()
+
+                    if store.isInspectorVisible && store.selectedProject != nil {
+                        DetailInspectorView(store: store)
+                            .transition(.move(edge: .trailing).combined(with: .opacity))
                     }
                 }
                 .transition(.opacity)
@@ -68,7 +70,8 @@ public struct HarborSnapshotShellView: View {
                 .frame(width: 1)
 
             ProjectCanvasView(store: store, horizonPingOverride: horizonPingOverride)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .frame(minWidth: 0, maxWidth: .infinity, maxHeight: .infinity)
+                .clipped()
 
             if store.isInspectorVisible && store.selectedProject != nil {
                 DetailInspectorView(store: store)

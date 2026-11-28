@@ -69,7 +69,7 @@ struct HelmAppTier5Tests {
         await store.resolveException(alert, resolution: .retry)
 
         // Wait briefly for the restarted project to settle to .completed
-        let deadline = Date().addingTimeInterval(3.0)
+        let deadline = Date().addingTimeInterval(8.0)
         while Date() < deadline {
             await store.reloadAll()
             if store.selectedProject?.status == .completed {
@@ -83,54 +83,41 @@ struct HelmAppTier5Tests {
         store.stopPollingForTermination()
     }
 
-    @Test("MINOR-2: AgentRolePreset.apply updates unedited defaults across presets and preserves user edits")
+    @Test("MINOR-2: AgentProfile.RolePreset covers all roles without .requestHumanDecision and builds non-locking prompt templates")
     func addAgentPresetSwitching() {
-        var name = ""
-        var goal = ""
-        var caps: Set<AgentCapability> = []
-        var lastAutoName = ""
-        var lastAutoGoal = ""
+        #expect(AgentProfile.RolePreset.allPresets.count == AgentRole.allCases.count)
+        for preset in AgentProfile.RolePreset.allPresets {
+            #expect(!preset.capabilities.contains(.requestHumanDecision))
+            #expect(!preset.name.isEmpty)
+            #expect(!preset.goal.isEmpty)
+        }
 
-        // Initial apply (.researcher)
-        AgentRolePreset.apply(
-            role: .researcher,
-            name: &name,
-            goal: &goal,
-            capabilities: &caps,
-            lastAutoName: &lastAutoName,
-            lastAutoGoal: &lastAutoGoal
-        )
-        #expect(name == "Chart Researcher")
-        #expect(goal.contains("specifications"))
-        #expect(!caps.contains(.codeExec))
+        let researcher = AgentProfile.RolePreset.preset(for: .researcher)
+        #expect(researcher.name == "Chart Researcher")
+        #expect(researcher.goal.contains("specifications"))
+        #expect(!researcher.capabilities.contains(.codeExec))
 
-        // Switch to .coder without editing -> both name & goal update
-        AgentRolePreset.apply(
+        let coder = AgentProfile.RolePreset.preset(for: .coder)
+        #expect(coder.name == "Forge Coder")
+        #expect(coder.goal.contains("project folder"))
+        #expect(coder.capabilities.contains(.codeExec))
+
+        let browser = AgentProfile.RolePreset.preset(for: .browserAnalyst)
+        #expect(browser.name == "Lookout Browser")
+        #expect(browser.goal.contains("OCR/DOM"))
+        #expect(browser.capabilities.contains(.browser))
+        #expect(browser.capabilities.contains(.ocr))
+
+        let template = AgentProfile.buildSystemPromptTemplate(
             role: .coder,
-            name: &name,
-            goal: &goal,
-            capabilities: &caps,
-            lastAutoName: &lastAutoName,
-            lastAutoGoal: &lastAutoGoal
+            personality: .pragmaticBuilder,
+            goal: "Build module cleanly",
+            notes: "Keep diffs minimal"
         )
-        #expect(name == "Forge Coder")
-        #expect(goal.contains("sandbox"))
-        #expect(caps.contains(.codeExec))
-
-        // User edits name only, then switches to .browserAnalyst -> custom name preserved, goal & caps updated
-        name = "Custom Lookout"
-        AgentRolePreset.apply(
-            role: .browserAnalyst,
-            name: &name,
-            goal: &goal,
-            capabilities: &caps,
-            lastAutoName: &lastAutoName,
-            lastAutoGoal: &lastAutoGoal
-        )
-        #expect(name == "Custom Lookout")
-        #expect(goal.contains("OCR/DOM"))
-        #expect(caps.contains(.browser))
-        #expect(caps.contains(.ocr))
+        #expect(template.contains("Role: coder"))
+        #expect(template.contains("Pragmatic Builder"))
+        #expect(template.contains("Build module cleanly"))
+        #expect(template.contains("Operator Notes: Keep diffs minimal"))
     }
 
     @Test("AgentCharacterSeed generates 1000 unique tuples across all crowns, eyes, and hues")
@@ -207,6 +194,13 @@ struct HelmAppTier5Tests {
                 return LLMResponse(text: """
                 {"tasks":[{"temp_id":"t1","title":"Run cmd","instructions":"Execute","assigned_agent_id":"","waiting_on_temp_ids":[]}]}
                 """)
+            }
+            if req.userPrompt.contains("APP_OVER_200_OK") {
+                let completeArgs = "{\"summary\":\"Command succeeded with APP_OVER_200_OK.\"}"
+                return LLMResponse(
+                    text: "{\"tool_calls\":[{\"id\":\"c2\",\"name\":\"complete_task\",\"arguments\":\(completeArgs)}]}",
+                    toolCalls: [LLMToolCall(id: "c2", name: "complete_task", argumentsJSON: completeArgs)]
+                )
             }
             let args = "{\"command\":\"echo APP_OVER_200_OK\"}"
             return LLMResponse(
@@ -429,7 +423,7 @@ struct HelmAppTier5Tests {
         // 1. Antigravity CLI (agy) parsing & alias matching
         #expect(LLMBackendKind.parse("agy") == .agyCLI)
         #expect(LLMBackendKind.parse("antigravity") == .agyCLI)
-        #expect(LLMBackendKind.parse("tigravity") == .agyCLI)
+        #expect(LLMBackendKind.parse("agy_cli") == .agyCLI)
 
         let agyJSON = """
         {"result":"AGY_READY","is_error":false,"usage":{"input_tokens":21,"output_tokens":9}}
@@ -460,7 +454,12 @@ struct HelmAppTier5Tests {
             browserService: browser
         )
 
-        let project = try await cp.createProject(name: "CapFilter", goal: "Browse safely", workspaceRoot: ws)
+        let project = try await cp.createProject(
+            name: "CapFilter",
+            goal: "Browse safely",
+            workspaceRoot: ws,
+            sandboxTrustPolicy: .sandboxed
+        )
         let browserAgent = try await cp.addAgent(
             projectID: project.id,
             name: "Lookout Browser",

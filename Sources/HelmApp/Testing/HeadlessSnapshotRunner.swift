@@ -107,6 +107,34 @@ public enum HeadlessSnapshotRunner {
                 )
             }
         }
+
+        // Optional M3 extra visual QA captures (1-on-1 direct chat + editable System Prompt inspector; navigable Tasks detail)
+        if ProcessInfo.processInfo.environment["HELM_SNAPSHOT_EXTRA"] == "1" {
+            let inspectorDirectStore = try await buildSeededStore(withException: false, reduceMotion: reduceMotion)
+            inspectorDirectStore.selectAgent(agentCoderID, openDirectChat: true, openInspector: true)
+
+            let tasksStore = try await buildSeededStore(withException: false, reduceMotion: reduceMotion)
+            tasksStore.openTaskInWorkspace(task2ID)
+
+            let extras: [(filename: String, store: HelmWorkspaceStore, isDark: Bool)] = [
+                ("helm_dark_inspector_direct\(suffix).png", inspectorDirectStore, true),
+                ("helm_light_inspector_direct\(suffix).png", inspectorDirectStore, false),
+                ("helm_dark_tasks_navigable\(suffix).png", tasksStore, true),
+                ("helm_light_tasks_navigable\(suffix).png", tasksStore, false),
+            ]
+            for extra in extras {
+                let view = HarborSnapshotShellView(store: extra.store, horizonPingOverride: true)
+                    .environment(\.helmReduceMotion, reduceMotion)
+                    .environment(\.helmWindowOccluded, false)
+                    .preferredColorScheme(extra.isDark ? .dark : .light)
+                try renderOffscreenPNG(
+                    rootView: view,
+                    size: CGSize(width: 1280, height: 800),
+                    isDark: extra.isDark,
+                    to: snapshotDirectory.appendingPathComponent(extra.filename)
+                )
+            }
+        }
     }
 
     private static func buildSeededStore(withException: Bool, reduceMotion: Bool) async throws -> HelmWorkspaceStore {
@@ -137,8 +165,8 @@ public enum HeadlessSnapshotRunner {
         // are preserved intact for steady-watch visual snapshots.
         try await cp.reloadFromStore()
 
-        let wsRoot1 = FileManager.default.temporaryDirectory.appendingPathComponent("helm_demo_ws1", isDirectory: true)
-        let wsRoot2 = FileManager.default.temporaryDirectory.appendingPathComponent("helm_demo_ws2", isDirectory: true)
+        let wsRoot1 = FileManager.default.temporaryDirectory.appendingPathComponent("harbor-telemetry-pipeline", isDirectory: true)
+        let wsRoot2 = FileManager.default.temporaryDirectory.appendingPathComponent("api-contract-verifier", isDirectory: true)
 
         let p1 = Project(
             id: proj1ID,
@@ -146,6 +174,7 @@ public enum HeadlessSnapshotRunner {
             goal: "Build local diagnostics pipeline, verify sandbox tests, and validate staging dashboard via Vision OCR.",
             workspaceRoot: wsRoot1,
             status: withException ? .held : .running,
+            sandboxTrustPolicy: .standardWorkspace,
             createdAt: fixedEpoch,
             updatedAt: fixedEpoch
         )
@@ -155,19 +184,33 @@ public enum HeadlessSnapshotRunner {
             goal: "Verify staging REST schemas and error handling silently in background.",
             workspaceRoot: wsRoot2,
             status: .idle,
+            sandboxTrustPolicy: .sandboxed,
             createdAt: fixedEpoch.addingTimeInterval(60),
             updatedAt: fixedEpoch.addingTimeInterval(60)
         )
         try await db.insertProject(p1)
         try await db.insertProject(p2)
 
+        let orchPrompt = """
+        Role: orchestrator
+        Style (Calm Commander): Lead decisively, keep work moving in parallel, and summarize verified outcomes.
+        Mission: Coordinate crew turns directly from harbor-telemetry-pipeline without stalling for routine confirmations.
+        """
+        let coderPrompt = """
+        Role: coder
+        Style (Pragmatic Builder): Inspect source files first, implement minimal diffs, and run unit suites before reporting.
+        Mission: Implement TelemetryCollector tests and verify pipeline benchmarks inside harbor-telemetry-pipeline.
+        """
+
         let orch = AgentProfile(
             id: agentOrchID,
             projectID: proj1ID,
             name: "Compass",
             role: .orchestrator,
-            goal: "Decompose milestones, coordinate workers, and stay silent unless intervention is required.",
-            capabilities: [.readSharedState, .proposeSharedState, .delegateTasks, .requestHumanDecision],
+            goal: AgentProfile.RolePreset.orchestrator.goal,
+            personality: .calmCommander,
+            systemPrompt: orchPrompt,
+            capabilities: AgentProfile.RolePreset.orchestrator.capabilities,
             backend: .claudeCLI,
             activityState: withException ? .waiting : .thinking,
             createdAt: fixedEpoch,
@@ -178,8 +221,9 @@ public enum HeadlessSnapshotRunner {
             projectID: proj1ID,
             name: "Chart",
             role: .researcher,
-            goal: "Synthesize architectural constraints and track provenance-verified facts.",
-            capabilities: [.readSharedState, .proposeSharedState],
+            goal: AgentProfile.RolePreset.researcher.goal,
+            personality: .methodicalArchitect,
+            capabilities: AgentProfile.RolePreset.researcher.capabilities,
             backend: .claudeCLI,
             activityState: .completed,
             createdAt: fixedEpoch.addingTimeInterval(5),
@@ -190,8 +234,10 @@ public enum HeadlessSnapshotRunner {
             projectID: proj1ID,
             name: "Forge",
             role: .coder,
-            goal: "Implement isolated build tasks and verify unit tests inside micro-VM.",
-            capabilities: [.codeExec, .readSharedState, .proposeSharedState, .requestHumanDecision],
+            goal: AgentProfile.RolePreset.coder.goal,
+            personality: .pragmaticBuilder,
+            systemPrompt: coderPrompt,
+            capabilities: AgentProfile.RolePreset.coder.capabilities,
             backend: .codexCLI,
             activityState: withException ? .exception : .executing,
             createdAt: fixedEpoch.addingTimeInterval(10),
@@ -202,8 +248,9 @@ public enum HeadlessSnapshotRunner {
             projectID: proj1ID,
             name: "Lookout",
             role: .browserAnalyst,
-            goal: "Inspect staging portal headlessly and extract text coordinates via Vision OCR.",
-            capabilities: [.browser, .ocr, .readSharedState, .proposeSharedState],
+            goal: AgentProfile.RolePreset.browserAnalyst.goal,
+            personality: .rapidOperator,
+            capabilities: AgentProfile.RolePreset.browserAnalyst.capabilities,
             backend: .foundationModels,
             activityState: withException ? .waiting : .browsing,
             createdAt: fixedEpoch.addingTimeInterval(15),
@@ -219,9 +266,10 @@ public enum HeadlessSnapshotRunner {
             assignedAgentID: agentResearcherID,
             createdByAgentID: agentOrchID,
             title: "Extract pipeline schema requirements",
-            instructions: "Verify telemetry fields and publish verified spec facts.",
+            instructions: "Inspect Sources/Telemetry/Schema.swift and publish verified telemetry field invariants to shared memory.",
             status: .done,
             resultSummary: "Published 3 schema invariants to shared state.",
+            artifactPaths: ["docs/telemetry-schema.md"],
             createdAt: fixedEpoch,
             updatedAt: fixedEpoch.addingTimeInterval(30)
         )
@@ -230,11 +278,15 @@ public enum HeadlessSnapshotRunner {
             projectID: proj1ID,
             assignedAgentID: agentCoderID,
             createdByAgentID: agentOrchID,
-            title: withException ? "Apply schema migration 004_audit_index" : "Run isolated sandbox benchmark suite",
-            instructions: "Execute verification suite inside isolated runtime.",
+            title: withException ? "Update host-level launchd plist" : "Run isolated sandbox benchmark suite",
+            instructions: withException
+                ? "Attempted to write outside harbor-telemetry-pipeline into ~/Library/LaunchAgents; halted by boundary guard."
+                : "Implement benchmark fixtures in Tests/TelemetryTests.swift and run swift test inside the project workspace.",
             status: withException ? .needsHuman : .running,
             waitingOn: [task1ID],
-            errorSummary: withException ? "Human approval required before applying destructive migration." : nil,
+            attemptCount: 1,
+            errorSummary: withException ? "Blocked write outside attached project folder (~/Library/LaunchAgents/com.helm.agent.plist)." : nil,
+            artifactPaths: ["Tests/TelemetryTests.swift"],
             createdAt: fixedEpoch.addingTimeInterval(15),
             updatedAt: fixedEpoch.addingTimeInterval(45)
         )
@@ -244,7 +296,7 @@ public enum HeadlessSnapshotRunner {
             assignedAgentID: agentBrowserID,
             createdByAgentID: agentOrchID,
             title: "Read staging health dashboard via Vision OCR",
-            instructions: "Navigate to staging portal and verify confirmation banner.",
+            instructions: "Navigate to staging portal and verify confirmation banner after benchmarks finish.",
             status: withException ? .blocked : .running,
             waitingOn: [task2ID],
             createdAt: fixedEpoch.addingTimeInterval(20),
@@ -252,6 +304,128 @@ public enum HeadlessSnapshotRunner {
         )
         for task in [t1, t2, t3] {
             try await db.insertTask(task)
+        }
+
+        let chatMessages: [ChatMessage] = [
+            ChatMessage(
+                id: UUID(uuidString: "00000000-0000-0000-0000-000000000801")!,
+                projectID: proj1ID,
+                channelKind: .crew,
+                senderKind: .user,
+                senderName: "You",
+                content: "Audit Sources/Telemetry, run the benchmark suite, and verify the staging health portal.",
+                referencedFiles: ["Sources/Telemetry/Schema.swift", "Package.swift"],
+                createdAt: fixedEpoch.addingTimeInterval(5)
+            ),
+            ChatMessage(
+                id: UUID(uuidString: "00000000-0000-0000-0000-000000000802")!,
+                projectID: proj1ID,
+                channelKind: .crew,
+                senderKind: .orchestrator,
+                senderAgentID: agentOrchID,
+                senderName: "Compass",
+                content: "Chart verified 3 schema invariants in docs/telemetry-schema.md. Forge is executing the benchmark suite now, with Lookout queued next.",
+                referencedFiles: ["docs/telemetry-schema.md"],
+                relatedTaskID: task1ID,
+                createdAt: fixedEpoch.addingTimeInterval(22)
+            ),
+            ChatMessage(
+                id: UUID(uuidString: "00000000-0000-0000-0000-000000000803")!,
+                projectID: proj1ID,
+                channelKind: .crew,
+                senderKind: .agent,
+                senderAgentID: agentCoderID,
+                senderName: "Forge",
+                content: withException
+                    ? "Paused at boundary check: writing outside harbor-telemetry-pipeline requires your explicit redirect or approval."
+                    : "62/62 core tests passed in 148 ms. Finishing throughput assertions in Tests/TelemetryTests.swift.",
+                referencedFiles: ["Tests/TelemetryTests.swift"],
+                relatedTaskID: task2ID,
+                createdAt: fixedEpoch.addingTimeInterval(42)
+            ),
+            ChatMessage(
+                id: UUID(uuidString: "00000000-0000-0000-0000-000000000804")!,
+                projectID: proj1ID,
+                channelKind: .direct(agentID: agentCoderID),
+                senderKind: .user,
+                senderName: "You",
+                content: "Keep the benchmark fixtures deterministic with fixed seeds and report p95 latency.",
+                referencedFiles: ["Tests/TelemetryTests.swift"],
+                relatedTaskID: task2ID,
+                createdAt: fixedEpoch.addingTimeInterval(30)
+            ),
+            ChatMessage(
+                id: UUID(uuidString: "00000000-0000-0000-0000-000000000805")!,
+                projectID: proj1ID,
+                channelKind: .direct(agentID: agentCoderID),
+                senderKind: .agent,
+                senderAgentID: agentCoderID,
+                senderName: "Forge",
+                content: "Locked deterministic fixture seeds and added p95 latency assertions to TelemetryTests.swift.",
+                referencedFiles: ["Tests/TelemetryTests.swift"],
+                relatedTaskID: task2ID,
+                createdAt: fixedEpoch.addingTimeInterval(44)
+            ),
+        ]
+        for msg in chatMessages {
+            try await db.insertChatMessage(msg)
+        }
+
+        let workEntries: [AgentWorkEntry] = [
+            AgentWorkEntry(
+                id: UUID(uuidString: "00000000-0000-0000-0000-000000000901")!,
+                projectID: proj1ID,
+                agentID: agentResearcherID,
+                agentName: "Chart",
+                taskID: task1ID,
+                taskTitle: t1.title,
+                stepNumber: 1,
+                phase: .completed,
+                summary: "Read Sources/Telemetry/Schema.swift and documented 3 telemetry field invariants.",
+                toolName: "read_workspace_file",
+                toolInputSummary: "Sources/Telemetry/Schema.swift",
+                toolOutputSummary: "Parsed TelemetryEnvelope v3 fields (48 lines)",
+                touchedFiles: ["Sources/Telemetry/Schema.swift"],
+                artifactPaths: ["docs/telemetry-schema.md"],
+                createdAt: fixedEpoch.addingTimeInterval(18)
+            ),
+            AgentWorkEntry(
+                id: UUID(uuidString: "00000000-0000-0000-0000-000000000902")!,
+                projectID: proj1ID,
+                agentID: agentCoderID,
+                agentName: "Forge",
+                taskID: task2ID,
+                taskTitle: t2.title,
+                stepNumber: 2,
+                phase: .fileEdit,
+                summary: "Added deterministic p95 throughput benchmark assertions.",
+                toolName: "write_workspace_file",
+                toolInputSummary: "Tests/TelemetryTests.swift (+34 lines)",
+                toolOutputSummary: "Updated Tests/TelemetryTests.swift",
+                touchedFiles: ["Tests/TelemetryTests.swift"],
+                createdAt: fixedEpoch.addingTimeInterval(34)
+            ),
+            AgentWorkEntry(
+                id: UUID(uuidString: "00000000-0000-0000-0000-000000000903")!,
+                projectID: proj1ID,
+                agentID: agentCoderID,
+                agentName: "Forge",
+                taskID: task2ID,
+                taskTitle: t2.title,
+                stepNumber: 3,
+                phase: withException ? .failed : .toolCall,
+                summary: withException
+                    ? "Boundary drift guard blocked out-of-workspace file write."
+                    : "Executing isolated test suite and collecting p95 timing metrics.",
+                toolName: withException ? "write_workspace_file" : "run_command",
+                toolInputSummary: withException ? "~/Library/LaunchAgents/com.helm.agent.plist" : "swift test --filter TelemetryTests",
+                toolOutputSummary: withException ? "Blocked: path escapes workspaceRoot" : "62/62 tests passed (148 ms)",
+                touchedFiles: ["Tests/TelemetryTests.swift"],
+                createdAt: fixedEpoch.addingTimeInterval(46)
+            ),
+        ]
+        for entry in workEntries {
+            try await db.insertAgentWorkEntry(entry)
         }
 
         let s1 = SharedStateEntry(
@@ -262,7 +436,7 @@ public enum HeadlessSnapshotRunner {
             category: .rule,
             key: "policy.isolation.mode",
             title: "Isolation Policy",
-            content: "All code execution must remain strictly inside the project sandbox without touching host focus.",
+            content: "All code execution must remain strictly inside the project folder without touching host focus.",
             trustLevel: .humanAuthoritative,
             provenance: ProvenanceRecord(source: .humanOwner),
             pinned: true,
@@ -305,7 +479,7 @@ public enum HeadlessSnapshotRunner {
             category: .continuity,
             key: "coder.last_checkpoint",
             title: "Coder Checkpoint",
-            content: "Compiled release binary cleanly; awaiting migration gate.",
+            content: "Compiled release binary cleanly; p95 latency 14.2 ms.",
             trustLevel: .agentGenerated,
             provenance: ProvenanceRecord(source: .workerAgent, authorAgentID: agentCoderID),
             createdAt: fixedEpoch.addingTimeInterval(40),
@@ -331,12 +505,13 @@ public enum HeadlessSnapshotRunner {
                 projectID: proj1ID,
                 taskID: task2ID,
                 agentID: agentCoderID,
-                kind: .humanDecision,
+                kind: .drift,
                 severity: .attention,
-                title: "Approval Required: Apply Schema Migration 004",
-                summary: "Forge requests permission to run destructive schema migration 004_audit_index.",
-                diagnosticSummary: "Task 'Apply schema migration 004_audit_index' paused at Human Decision Gate. Sandbox diff touches 2 indexed tables.",
-                dedupKey: "demo-human-decision-004",
+                title: "Boundary Drift: Out-of-Workspace Write Blocked",
+                summary: "Forge attempted to write outside the attached project folder.",
+                diagnosticSummary: "Blocked write to ~/Library/LaunchAgents/com.helm.agent.plist. Redirect Forge to keep config artifacts inside harbor-telemetry-pipeline.",
+                suggestedOptions: ["redirect", "retry", "abort"],
+                dedupKey: "demo-boundary-drift-001",
                 status: .open,
                 createdAt: fixedEpoch.addingTimeInterval(50)
             )
@@ -347,7 +522,7 @@ public enum HeadlessSnapshotRunner {
                 agentID: agentCoderID,
                 taskID: task2ID,
                 kind: .exceptionRaised,
-                summary: "[humanDecision] Approval Required: Apply Schema Migration 004",
+                summary: "[drift] Boundary Drift: Out-of-Workspace Write Blocked",
                 trustLevel: .orchestratorVerified,
                 createdAt: fixedEpoch.addingTimeInterval(50)
             ))
@@ -356,13 +531,14 @@ public enum HeadlessSnapshotRunner {
         await store.reloadAll()
         store.selectProject(proj1ID)
         store.selectedAgentID = withException ? agentCoderID : agentOrchID
-        store.isInspectorVisible = true
+        store.isInspectorVisible = false
+        store.secondaryTab = .liveWork
 
         store.latestExecutionResultByProject[proj1ID] = ExecutionResult(
             requestID: UUID(uuidString: "00000000-0000-0000-0000-000000000701")!,
             modeUsed: .virtualizationVM,
             exitCode: 0,
-            stdout: "$ swift test --filter HelmCoreTests\nTest Suite 'All tests' passed (62 tests, 0 failures)\nworkspace: /workspace (isolated)",
+            stdout: "$ swift test --filter TelemetryTests\nTest Suite 'All tests' passed (62 tests, 0 failures)\nworkspace: /workspace (isolated)",
             stderr: "",
             timedOut: false,
             truncatedOutput: false,

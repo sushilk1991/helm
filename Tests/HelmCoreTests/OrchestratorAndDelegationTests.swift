@@ -276,7 +276,7 @@ struct OrchestratorAndDelegationTests {
         #expect(try await db.listExceptions(projectID: pA.id, openOnly: true).isEmpty)
     }
 
-    @Test("HelmControlPlane concurrent ask_human hold resets sibling task from .running to .queued and completes after approve")
+    @Test("HelmControlPlane concurrent ask_human hold isolates held task, lets healthy sibling finish, and completes after approve")
     func controlPlaneConcurrentAskHumanHoldResolveResume() async throws {
         actor CallCounter {
             private var counts: [UUID: Int] = [:]
@@ -312,7 +312,7 @@ struct OrchestratorAndDelegationTests {
                     toolCalls: [LLMToolCall(id: "doneA", name: "complete_task", argumentsJSON: args)]
                 )
             } else {
-                try await Task.sleep(nanoseconds: 200_000_000)
+                try await Task.sleep(nanoseconds: 120_000_000)
                 let args = "{\"summary\":\"TaskB done\"}"
                 return LLMResponse(
                     text: "{\"tool_calls\":[{\"id\":\"doneB\",\"name\":\"complete_task\",\"arguments\":\(args)}]}",
@@ -342,19 +342,25 @@ struct OrchestratorAndDelegationTests {
             projectID: project.id,
             assignedAgentID: agentB.id,
             title: "TaskB",
-            instructions: "Complete after 200ms",
+            instructions: "Complete independently",
             status: .queued,
             waitingOn: []
         )
         try await db.insertTask(taskA)
         try await db.insertTask(taskB)
 
-        let report1 = try await cp.runProjectUntilSettled(projectID: project.id, maxSteps: 10)
+        let orchestrator = OrchestratorActor(
+            projectID: project.id,
+            database: db,
+            sharedStateStore: SharedStateStore(database: db),
+            providerRegistry: .makeDefault(mockProvider: mock)
+        )
+        let report1 = try await orchestrator.run(maxSteps: 10, allowHumanDecisionTool: true)
         #expect(report1.status == .held)
         #expect(try await db.fetchTask(id: taskAID)?.status == .needsHuman)
-        #expect(try await db.fetchTask(id: taskBID)?.status == .queued)
+        #expect(try await db.fetchTask(id: taskBID)?.status == .done)
         #expect(try await db.fetchAgent(id: agentA.id)?.activityState == .exception)
-        #expect(try await db.fetchAgent(id: agentB.id)?.activityState == .idle)
+        #expect(try await db.fetchAgent(id: agentB.id)?.activityState == .completed)
 
         let openExceptions = try await cp.listExceptions(projectID: project.id, openOnly: true)
         #expect(openExceptions.count == 1)

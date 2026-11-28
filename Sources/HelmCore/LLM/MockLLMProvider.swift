@@ -194,6 +194,37 @@ public actor MockLLMProvider: LLMProvider {
             )
         }
 
+        if request.userPrompt.contains("CREW_CHAT") || request.userPrompt.contains("DIRECT_CHAT") {
+            let channelLabel = request.userPrompt.contains("CREW_CHAT") ? "crew" : "direct"
+            let summary = "Completed \(channelLabel) chat response at step \(request.stepIndex) cleanly."
+            let args: [String: Any] = ["summary": summary]
+            let argsData = (try? JSONSerialization.data(withJSONObject: args, options: [.sortedKeys])) ?? Data("{}".utf8)
+            let argsJSON = String(data: argsData, encoding: .utf8) ?? "{}"
+            let responseText = """
+            {
+              "thought": "Responding cleanly to \(channelLabel) chat with workspace context",
+              "tool_calls": [
+                {
+                  "id": "chat_\(callCounter)",
+                  "name": "complete_task",
+                  "arguments": \(argsJSON)
+                }
+              ],
+              "final_response": "\(summary)",
+              "steady_ok": true
+            }
+            """
+            return LLMResponse(
+                text: responseText,
+                toolCalls: [
+                    LLMToolCall(id: "chat_\(callCounter)", name: "complete_task", argumentsJSON: argsJSON),
+                ],
+                usage: LLMUsage(inputTokens: 45, outputTokens: 32),
+                stopReason: "end_turn",
+                latencyMs: 2.0
+            )
+        }
+
         let summary = "Completed task at step \(request.stepIndex) cleanly."
         let args: [String: Any] = [
             "summary": summary,

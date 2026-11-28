@@ -314,6 +314,13 @@ struct Tier5AdversarialTests {
                 {"tasks":[{"temp_id":"t1","title":"Check page","instructions":"Browse /form and click SUBMIT ORDER","assigned_agent_id":"\(browserAgent.id.uuidString)","waiting_on_temp_ids":[]}]}
                 """)
             }
+            if req.userPrompt.contains("[Execution Transcript]") {
+                let args = "{\"summary\":\"Browser observed and clicked SUBMIT ORDER\"}"
+                return LLMResponse(
+                    text: "{\"tool_calls\":[{\"id\":\"done1\",\"name\":\"complete_task\",\"arguments\":\(args)}]}",
+                    toolCalls: [LLMToolCall(id: "done1", name: "complete_task", argumentsJSON: args)]
+                )
+            }
             await capture.set(req.tools.map(\.name))
             let args = "{\"action\":\"click_ocr\",\"url\":\"http://127.0.0.1/form\",\"query\":\"SUBMIT ORDER\"}"
             return LLMResponse(
@@ -392,6 +399,9 @@ struct Tier5AdversarialTests {
         let server = try await LocalOpenAIServer.start { rawReq in
             if rawReq.contains("DECOMPOSE_GOAL") {
                 return "{\"tasks\":[{\"temp_id\":\"t1\",\"title\":\"Write marker\",\"instructions\":\"Run echo\",\"assigned_agent_id\":\"\(agent.id.uuidString)\",\"waiting_on_temp_ids\":[]}]}"
+            }
+            if rawReq.contains("[Execution Transcript]") {
+                return "{\"thought\":\"done\",\"tool_calls\":[{\"id\":\"done1\",\"name\":\"complete_task\",\"arguments\":{\"summary\":\"T5_EXEC_OK\"}}]}"
             }
             return "{\"thought\":\"run cmd\",\"tool_calls\":[{\"id\":\"r1\",\"name\":\"run_command\",\"arguments\":{\"command\":\"printf 'T5_EXEC_OK' > t5_marker.txt && cat t5_marker.txt\"}}]}"
         }
@@ -625,6 +635,13 @@ struct Tier5AdversarialTests {
                 {"tasks":[{"temp_id":"t1","title":"Run cmd","instructions":"Execute","assigned_agent_id":"\(coder.id.uuidString)","waiting_on_temp_ids":[]}]}
                 """)
             }
+            if req.userPrompt.contains("[Execution Transcript]") {
+                let args = "{\"summary\":\"CORE_OVER_200_OK\"}"
+                return LLMResponse(
+                    text: "{\"tool_calls\":[{\"id\":\"done1\",\"name\":\"complete_task\",\"arguments\":\(args)}]}",
+                    toolCalls: [LLMToolCall(id: "done1", name: "complete_task", argumentsJSON: args)]
+                )
+            }
             let args = "{\"command\":\"echo CORE_OVER_200_OK\"}"
             return LLMResponse(
                 text: "{\"tool_calls\":[{\"id\":\"c1\",\"name\":\"run_command\",\"arguments\":\(args)}]}",
@@ -681,6 +698,13 @@ struct Tier5AdversarialTests {
                 {"tasks":[{"temp_id":"t1","title":"Browse","instructions":"Navigate","assigned_agent_id":"\(lookout.id.uuidString)","waiting_on_temp_ids":[]}]}
                 """)
             }
+            if req.userPrompt.contains("[Execution Transcript]") {
+                let args = "{\"summary\":\"Persisted screenshot\"}"
+                return LLMResponse(
+                    text: "{\"tool_calls\":[{\"id\":\"done1\",\"name\":\"complete_task\",\"arguments\":\(args)}]}",
+                    toolCalls: [LLMToolCall(id: "done1", name: "complete_task", argumentsJSON: args)]
+                )
+            }
             let args = "{\"action\":\"navigate\",\"url\":\"http://127.0.0.1/persisted\"}"
             return LLMResponse(
                 text: "{\"tool_calls\":[{\"id\":\"b1\",\"name\":\"browser_act\",\"arguments\":\(args)}]}",
@@ -731,6 +755,13 @@ struct Tier5AdversarialTests {
                 return LLMResponse(text: """
                 {"tasks":[{"temp_id":"t1","title":"Browse","instructions":"Navigate","assigned_agent_id":"\(a2.id.uuidString)","waiting_on_temp_ids":[]}]}
                 """)
+            }
+            if req.userPrompt.contains("[Execution Transcript]") {
+                let args = "{\"summary\":\"Handled missing screenshot\"}"
+                return LLMResponse(
+                    text: "{\"tool_calls\":[{\"id\":\"done2\",\"name\":\"complete_task\",\"arguments\":\(args)}]}",
+                    toolCalls: [LLMToolCall(id: "done2", name: "complete_task", argumentsJSON: args)]
+                )
             }
             let args = "{\"action\":\"navigate\",\"url\":\"http://127.0.0.1/mock\"}"
             return LLMResponse(

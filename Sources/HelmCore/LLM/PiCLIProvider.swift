@@ -82,6 +82,7 @@ public struct PiCLIProvider: LLMProvider, Sendable {
             output = try await ProcessRunner.run(
                 executableURL: execURL,
                 arguments: args,
+                currentDirectoryURL: request.validatedWorkingDirectory,
                 environment: processEnv,
                 stdinData: nil,
                 timeoutSeconds: request.timeoutSeconds

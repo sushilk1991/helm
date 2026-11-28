@@ -238,7 +238,8 @@ public actor SharedStateStore {
         projectID: UUID,
         agentID: UUID,
         rawChannels: [PromptChannel: String],
-        now: Date = Date()
+        now: Date = Date(),
+        forceFullContext: Bool = false
     ) async throws -> [PromptChannelSlice] {
         let existing = try await database.fetchPromptChannelDigests(projectID: projectID, agentID: agentID)
         var slices: [PromptChannelSlice] = []
@@ -251,7 +252,7 @@ public actor SharedStateStore {
                 slices.append(PromptChannelSlice(
                     channel: channel,
                     sha256Digest: digest,
-                    content: nil,
+                    content: forceFullContext ? raw : nil,
                     wasChanged: false,
                     supersedesPrevious: false
                 ))

@@ -71,6 +71,7 @@ public struct ClaudeCLIProvider: LLMProvider, Sendable {
             output = try await ProcessRunner.run(
                 executableURL: execURL,
                 arguments: args,
+                currentDirectoryURL: request.validatedWorkingDirectory,
                 environment: processEnv,
                 timeoutSeconds: request.timeoutSeconds
             )

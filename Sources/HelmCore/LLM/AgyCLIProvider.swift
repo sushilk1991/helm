@@ -65,11 +65,16 @@ public struct AgyCLIProvider: LLMProvider, Sendable {
             args.append(contentsOf: ["--model", model])
         }
 
+        var processEnv = ProcessInfo.processInfo.environment
+        processEnv["PATH"] = CLIAuthService.augmentedPATH(from: processEnv["PATH"])
+
         let output: ProcessOutput
         do {
             output = try await ProcessRunner.run(
                 executableURL: execURL,
                 arguments: args,
+                currentDirectoryURL: request.validatedWorkingDirectory,
+                environment: processEnv,
                 stdinData: nil,
                 timeoutSeconds: request.timeoutSeconds
             )

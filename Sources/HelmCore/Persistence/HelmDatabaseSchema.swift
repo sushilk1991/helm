@@ -1,7 +1,53 @@
 import Foundation
 
 public enum HelmDatabaseSchema {
-    public static let currentVersion: Int32 = 2
+    public static let currentVersion: Int32 = 4
+
+    public static let migrationV4SQL: String = """
+    ALTER TABLE tasks ADD COLUMN task_kind TEXT NOT NULL DEFAULT 'goal';
+    """
+
+    public static let migrationV3SQL: String = """
+    ALTER TABLE projects ADD COLUMN sandbox_trust_policy TEXT NOT NULL DEFAULT 'standardWorkspace';
+    ALTER TABLE agents ADD COLUMN system_prompt TEXT NOT NULL DEFAULT '';
+
+    CREATE TABLE IF NOT EXISTS chat_messages (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        channel_key TEXT NOT NULL,
+        sender_kind TEXT NOT NULL CHECK (sender_kind IN ('user','agent','orchestrator','system')),
+        sender_agent_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
+        sender_name TEXT NOT NULL,
+        content TEXT NOT NULL,
+        referenced_files_json TEXT NOT NULL DEFAULT '[]',
+        related_task_id TEXT REFERENCES tasks(id) ON DELETE SET NULL,
+        created_at REAL NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_chat_messages_project_channel
+        ON chat_messages(project_id, channel_key, created_at);
+
+    CREATE TABLE IF NOT EXISTS agent_work_entries (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+        agent_name TEXT NOT NULL,
+        task_id TEXT REFERENCES tasks(id) ON DELETE SET NULL,
+        task_title TEXT,
+        step_number INTEGER NOT NULL DEFAULT 0,
+        phase TEXT NOT NULL CHECK (phase IN ('planning','reasoning','toolCall','fileEdit','completed','failed')),
+        summary TEXT NOT NULL,
+        tool_name TEXT,
+        tool_input_summary TEXT,
+        tool_output_summary TEXT,
+        touched_files_json TEXT NOT NULL DEFAULT '[]',
+        artifact_paths_json TEXT NOT NULL DEFAULT '[]',
+        created_at REAL NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_work_entries_project_created
+        ON agent_work_entries(project_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_work_entries_agent_created
+        ON agent_work_entries(project_id, agent_id, created_at);
+    """
 
     public static let migrationV2SQL: String = """
     ALTER TABLE agents ADD COLUMN personality TEXT NOT NULL DEFAULT 'pragmaticBuilder';

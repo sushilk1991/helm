@@ -120,7 +120,8 @@ public actor OrchestratorActor {
 
     public func run(
         maxSteps: Int? = nil,
-        simulatedCondition: SimulatedConditionKind? = nil
+        simulatedCondition: SimulatedConditionKind? = nil,
+        allowHumanDecisionTool: Bool = false
     ) async throws -> ProjectRunReport {
         guard let project = try await database.fetchProject(id: projectID) else {
             throw OrchestrationError.projectNotFound(projectID)
@@ -250,15 +251,17 @@ public actor OrchestratorActor {
             }
         }
 
-        // Phase 1: Goal Decomposition (if no active tasks exist)
+        // Phase 1: Goal Decomposition (if no goal tasks exist; ignore prior chat turns)
         var tasks = try await database.listTasks(projectID: projectID)
-        if effectiveSimulatedCondition == .cycle && !tasks.isEmpty {
+        let goalTasks = tasks.filter { $0.taskKind == .goal }
+        if effectiveSimulatedCondition == .cycle && !goalTasks.isEmpty {
             try await triggerSimulatedCycleHold(project: project, agentID: agents.first?.id)
             return try await buildReport(projectID: projectID, status: .held, stepsExecuted: 1)
         }
-        if tasks.isEmpty {
-            tasks = try await decomposeGoal(project: project, agents: agents, registry: effectiveRegistry)
-            if tasks.isEmpty {
+        if goalTasks.isEmpty {
+            let decomposedTasks = try await decomposeGoal(project: project, agents: agents, registry: effectiveRegistry)
+            tasks.append(contentsOf: decomposedTasks)
+            if decomposedTasks.isEmpty {
                 let openExceptions = try await database.listExceptions(projectID: projectID, openOnly: true)
                 let finalStatus: RunOutcomeStatus = openExceptions.isEmpty ? .completed : .held
                 if finalStatus == .completed {
@@ -284,10 +287,16 @@ public actor OrchestratorActor {
         )
 
         let agentsByID = Dictionary(uniqueKeysWithValues: agents.map { ($0.id, $0) })
+        let crewCapabilities = agents.reduce(into: Set<AgentCapability>()) { $0.formUnion($1.capabilities) }
         var stepsExecuted = 0
         let stepLimit = maxSteps ?? project.budgetPolicy.maxStepsPerRun
-        var haltedByHold = false
+        var anyHoldTriggered = false
         var hitMaxSteps = false
+        var heldAgentIDs = Set(openAtStart.compactMap(\.agentID))
+        for a in agents where a.activityState == .exception {
+            heldAgentIDs.insert(a.id)
+        }
+        let allowAskHuman = allowHumanDecisionTool || (effectiveSimulatedCondition == .humanDecision)
 
         var inFlightIDs = Set<UUID>()
         let queuedInitial = tasks.filter { $0.status == .queued }
@@ -308,6 +317,7 @@ public actor OrchestratorActor {
                     let initialBatch = try await prepareReadyBatch(
                         agentsByID: agentsByID,
                         inFlightIDs: inFlightIDs,
+                        heldAgentIDs: heldAgentIDs,
                         stepsExecuted: stepsExecuted,
                         stepLimit: stepLimit
                     )
@@ -317,12 +327,16 @@ public actor OrchestratorActor {
                         let snapshotTask = item.task
                         let snapshotAgent = item.agent
                         let stepForCall = item.stepIndex
+                        let capOverride: Set<AgentCapability>? = (snapshotTask.taskKind == .chat && Self.resolveChatChannel(for: snapshotTask) == .crew) ? crewCapabilities : nil
                         group.addTask {
                             let outcome = await workerRunner.executeAttempt(
                                 project: project,
                                 agent: snapshotAgent,
                                 task: snapshotTask,
-                                stepIndex: stepForCall
+                                stepIndex: stepForCall,
+                                maxTurns: 12,
+                                allowHumanDecisionTool: allowAskHuman,
+                                effectiveCapabilitiesOverride: capOverride
                             )
                             return (snapshotTask.id, outcome)
                         }
@@ -385,16 +399,19 @@ public actor OrchestratorActor {
                                             )
                                             _ = try await humanDecisionGate.triggerHold(alert: alert)
                                         }
-                                        haltedByHold = true
+                                        heldAgentIDs.insert(task.assignedAgentID)
+                                        anyHoldTriggered = true
                                         writeFailedWithHold = true
-                                        group.cancelAll()
                                         break
                                     }
                                 }
                                 if writeFailedWithHold { break }
 
+                                let effectiveSummary = (task.taskKind == .chat && summary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                                    ? "Completed request in \(project.workspaceRoot.lastPathComponent)."
+                                    : summary
                                 task.status = .done
-                                task.resultSummary = summary
+                                task.resultSummary = effectiveSummary
                                 task.errorSummary = nil
                                 task.artifactPaths.append(contentsOf: artifactPaths)
                                 task.completedAt = Date()
@@ -406,9 +423,33 @@ public actor OrchestratorActor {
                                     agentID: task.assignedAgentID,
                                     taskID: task.id,
                                     kind: .taskCompleted,
-                                    summary: "Task '\(task.title)' completed: \(summary)",
+                                    summary: "Task '\(task.title)' completed: \(effectiveSummary)",
                                     trustLevel: .orchestratorVerified
                                 ))
+
+                                if task.taskKind == .chat {
+                                    let channel = Self.resolveChatChannel(for: task)
+                                    let existingChannelMessages = try await database.listChatMessages(
+                                        projectID: projectID,
+                                        channel: channel,
+                                        limit: 200
+                                    )
+                                    if !existingChannelMessages.contains(where: { $0.relatedTaskID == task.id && $0.senderKind != .user }) {
+                                        let assignedAgent = agentsByID[task.assignedAgentID]
+                                        let replySenderKind: ChatSenderKind = (assignedAgent?.role == .orchestrator) ? .orchestrator : .agent
+                                        let replyMessage = ChatMessage(
+                                            projectID: projectID,
+                                            channelKind: channel,
+                                            senderKind: replySenderKind,
+                                            senderAgentID: task.assignedAgentID,
+                                            senderName: assignedAgent?.name ?? "Agent",
+                                            content: effectiveSummary,
+                                            referencedFiles: artifactPaths,
+                                            relatedTaskID: task.id
+                                        )
+                                        try await database.insertChatMessage(replyMessage)
+                                    }
+                                }
 
                                 if sharedWrites.isEmpty {
                                     let autoKey = "task.\(task.id.uuidString.prefix(8)).summary"
@@ -468,8 +509,8 @@ public actor OrchestratorActor {
                                         dedupKey: "\(kind.rawValue):\(task.id.uuidString)"
                                     )
                                     _ = try await humanDecisionGate.triggerHold(alert: alert)
-                                    haltedByHold = true
-                                    group.cancelAll()
+                                    heldAgentIDs.insert(task.assignedAgentID)
+                                    anyHoldTriggered = true
                                 }
 
                             case .hold(let kind, let severity, let title, let summary, let options):
@@ -495,14 +536,15 @@ public actor OrchestratorActor {
                                     )
                                     _ = try await humanDecisionGate.triggerHold(alert: alert)
                                 }
-                                haltedByHold = true
-                                group.cancelAll()
+                                heldAgentIDs.insert(task.assignedAgentID)
+                                anyHoldTriggered = true
                             }
 
-                            if haltedByHold { break }
                             if stepsExecuted >= stepLimit {
                                 let remaining = try await database.listTasks(projectID: projectID)
-                                if remaining.contains(where: { $0.status == .queued || $0.status == .blocked || $0.status == .running }) {
+                                if remaining.contains(where: {
+                                    $0.taskKind == .goal && ($0.status == .queued || $0.status == .blocked || $0.status == .running)
+                                }) {
                                     hitMaxSteps = true
                                 }
                                 if !inFlightIDs.isEmpty {
@@ -514,6 +556,7 @@ public actor OrchestratorActor {
                             let nextBatch = try await prepareReadyBatch(
                                 agentsByID: agentsByID,
                                 inFlightIDs: inFlightIDs,
+                                heldAgentIDs: heldAgentIDs,
                                 stepsExecuted: stepsExecuted,
                                 stepLimit: stepLimit
                             )
@@ -523,12 +566,16 @@ public actor OrchestratorActor {
                                 let snapshotTask = item.task
                                 let snapshotAgent = item.agent
                                 let stepForCall = item.stepIndex
+                                let capOverride: Set<AgentCapability>? = (snapshotTask.taskKind == .chat && Self.resolveChatChannel(for: snapshotTask) == .crew) ? crewCapabilities : nil
                                 group.addTask {
                                     let outcome = await workerRunner.executeAttempt(
                                         project: project,
                                         agent: snapshotAgent,
                                         task: snapshotTask,
-                                        stepIndex: stepForCall
+                                        stepIndex: stepForCall,
+                                        maxTurns: 12,
+                                        allowHumanDecisionTool: allowAskHuman,
+                                        effectiveCapabilitiesOverride: capOverride
                                     )
                                     return (snapshotTask.id, outcome)
                                 }
@@ -544,28 +591,29 @@ public actor OrchestratorActor {
         }
 
         let finalTasks = try await database.listTasks(projectID: projectID)
+        let finalGoalTasks = finalTasks.filter { $0.taskKind == .goal }
         let openExceptions = try await database.listExceptions(projectID: projectID, openOnly: true)
 
         let finalOutcome: RunOutcomeStatus
-        if !openExceptions.isEmpty || haltedByHold {
+        if !openExceptions.isEmpty || anyHoldTriggered {
             try await database.updateProjectStatus(id: projectID, status: .held)
             finalOutcome = .held
-        } else if !finalTasks.isEmpty && finalTasks.allSatisfy({ $0.status == .done }) {
+        } else if !finalGoalTasks.isEmpty && finalGoalTasks.allSatisfy({ $0.status == .done }) {
             try await database.updateProjectStatus(id: projectID, status: .completed)
             try await database.appendEvent(RunEvent(
                 projectID: projectID,
                 kind: .projectCompleted,
-                summary: "Project '\(project.name)' completed all \(finalTasks.count) tasks.",
+                summary: "Project '\(project.name)' completed all \(finalGoalTasks.count) tasks.",
                 trustLevel: .orchestratorVerified
             ))
             finalOutcome = .completed
         } else if hitMaxSteps {
             try await database.updateProjectStatus(id: projectID, status: .paused)
             finalOutcome = .maxStepsReached
-        } else if finalTasks.contains(where: { $0.status == .failed || $0.status == .outcomeUnknown }) {
+        } else if finalGoalTasks.contains(where: { $0.status == .failed || $0.status == .outcomeUnknown }) {
             try await database.updateProjectStatus(id: projectID, status: .failed)
             finalOutcome = .failed
-        } else if finalTasks.contains(where: {
+        } else if finalGoalTasks.contains(where: {
             $0.status == .cancelled || $0.status == .blocked || $0.status == .needsHuman || $0.status == .queued || $0.status == .running
         }) || project.status == .paused {
             try await database.updateProjectStatus(id: projectID, status: .paused)
@@ -586,6 +634,7 @@ public actor OrchestratorActor {
     private func prepareReadyBatch(
         agentsByID: [UUID: AgentProfile],
         inFlightIDs: Set<UUID>,
+        heldAgentIDs: Set<UUID>,
         stepsExecuted: Int,
         stepLimit: Int
     ) async throws -> ReadyBatch {
@@ -601,6 +650,7 @@ public actor OrchestratorActor {
                 hitMax = true
                 break
             }
+            if heldAgentIDs.contains(task.assignedAgentID) { continue }
             guard let agent = agentsByID[task.assignedAgentID] else { continue }
             localInFlight += 1
             task.status = .running
@@ -682,14 +732,32 @@ public actor OrchestratorActor {
             ? "\(orchPersonality.displayName): \(orchPersonality.promptDirective)"
             : "\(orchPersonality.displayName): \(orchPersonality.promptDirective) Custom traits: \(orchNotes)"
 
+        let orchSystemBase = orchestrator?.systemPrompt.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let orchCustomSection = orchSystemBase.isEmpty ? "" : "\nOrchestrator Instructions:\n\(orchSystemBase)\n"
+        let wsListing = AgentWorkerRunner.workspaceTopLevelSummary(workspaceRoot: project.workspaceRoot)
+
         let provider = try registry.provider(for: backendToUse)
         let request = LLMRequest(
             agentID: orchestrator?.id ?? project.id,
             projectID: project.id,
             stepIndex: 0,
-            systemPrompt: "Role: orchestrator\nPersonality: \(personalityDirective)\nDecompose the project goal into concrete tasks for the available specialized agents. Match each task strictly to an agent's capabilities (assign shell/repo/code tasks to agents with codeExec, web browsing tasks to agents with browser) and parallelize independent starter tasks with empty waiting_on_temp_ids whenever possible. Reply strictly with JSON {\"tasks\":[{\"temp_id\":\"t1\",\"title\":\"...\",\"instructions\":\"...\",\"assigned_agent_id\":\"<uuid>\",\"waiting_on_temp_ids\":[]}]}",
-            userPrompt: "DECOMPOSE_GOAL\nProject: \(project.name)\nGoal: \(project.goal)\n\(rosterLines)",
-            timeoutSeconds: project.budgetPolicy.stepTimeoutSeconds
+            systemPrompt: """
+            Role: orchestrator
+            Personality: \(personalityDirective)\(orchCustomSection)
+            Decompose the project goal into concrete autonomous tasks for the available specialized agents inside workspace '\(project.workspaceRoot.path)'. Match each task to an agent's capabilities (assign shell/repo/code tasks to agents with codeExec, web browsing tasks to agents with browser), instruct agents to discover files/configs directly in the attached workspace without stalling for routine clarifications, and parallelize independent starter tasks with empty waiting_on_temp_ids whenever possible. Reply strictly with JSON {"tasks":[{"temp_id":"t1","title":"...","instructions":"...","assigned_agent_id":"<uuid>","waiting_on_temp_ids":[]}]}
+            """,
+            userPrompt: """
+            DECOMPOSE_GOAL
+            Project: \(project.name)
+            Goal: \(project.goal)
+            Workspace: \(project.workspaceRoot.path)
+            TrustPolicy: \(project.sandboxTrustPolicy.rawValue)
+            TopLevelWorkspaceFiles:
+            \(wsListing)
+            \(rosterLines)
+            """,
+            timeoutSeconds: project.budgetPolicy.stepTimeoutSeconds,
+            workingDirectory: project.workspaceRoot
         )
 
         var decomposed: [DelegatedTask]? = nil
@@ -862,17 +930,325 @@ public actor OrchestratorActor {
     }
 
     private func promoteReadyBlockedTasks(_ tasks: [DelegatedTask]) async throws -> [DelegatedTask] {
-        let byID = Dictionary(uniqueKeysWithValues: tasks.map { ($0.id, $0) })
         var updatedList = tasks
-        for idx in updatedList.indices where updatedList[idx].status == .blocked {
-            let allDepsDone = updatedList[idx].waitingOn.allSatisfy { byID[$0]?.status == .done }
-            if allDepsDone {
-                updatedList[idx].status = .queued
-                updatedList[idx].updatedAt = Date()
-                try await database.updateTask(updatedList[idx])
+        var changed = true
+        while changed {
+            changed = false
+            let byID = Dictionary(uniqueKeysWithValues: updatedList.map { ($0.id, $0) })
+            for idx in updatedList.indices where updatedList[idx].status == .blocked {
+                if let failedDepID = updatedList[idx].waitingOn.first(where: {
+                    let st = byID[$0]?.status
+                    return st == .failed || st == .cancelled
+                }) {
+                    let depStatus = byID[failedDepID]?.status
+                    let reason = depStatus == .cancelled
+                        ? "Upstream dependency cancelled."
+                        : "Upstream dependency failed."
+                    updatedList[idx].status = .cancelled
+                    updatedList[idx].errorSummary = reason
+                    updatedList[idx].updatedAt = Date()
+                    try await database.updateTask(updatedList[idx])
+                    try await database.appendEvent(RunEvent(
+                        projectID: projectID,
+                        agentID: updatedList[idx].assignedAgentID,
+                        taskID: updatedList[idx].id,
+                        kind: .taskFailed,
+                        summary: "Cancelled blocked task '\(updatedList[idx].title)' because \(reason.lowercased())",
+                        trustLevel: .orchestratorVerified
+                    ))
+                    changed = true
+                } else {
+                    let allDepsDone = updatedList[idx].waitingOn.allSatisfy { byID[$0]?.status == .done }
+                    if allDepsDone {
+                        updatedList[idx].status = .queued
+                        updatedList[idx].updatedAt = Date()
+                        try await database.updateTask(updatedList[idx])
+                        changed = true
+                    }
+                }
             }
         }
         return updatedList
+    }
+
+    // MARK: - 1-on-1 & Shared Crew Chat Execution
+
+    public func handleChatMessage(_ incoming: ChatMessage) async throws -> [ChatMessage] {
+        guard let project = try await database.fetchProject(id: projectID) else {
+            throw OrchestrationError.projectNotFound(projectID)
+        }
+        let agents = try await database.listAgents(projectID: projectID)
+        if agents.isEmpty {
+            return [
+                ChatMessage(
+                    projectID: projectID,
+                    channelKind: incoming.channelKind,
+                    senderKind: .system,
+                    senderAgentID: nil,
+                    senderName: "Helm",
+                    content: "No agents are attached to '\(project.name)' yet. Add an agent to start autonomous execution in \(project.workspaceRoot.lastPathComponent).",
+                    referencedFiles: [],
+                    relatedTaskID: nil
+                ),
+            ]
+        }
+
+        let recentMessages = try await database.listChatMessages(
+            projectID: projectID,
+            channel: incoming.channelKind,
+            limit: 12
+        )
+        let recentTranscript = recentMessages.map { msg in
+            "[\(msg.senderName)]: \(msg.content)"
+        }.joined(separator: "\n")
+
+        let workerRunner = AgentWorkerRunner(
+            database: database,
+            sharedStateStore: sharedStateStore,
+            providerRegistry: providerRegistry,
+            sandboxExecutor: sandboxExecutor,
+            browserService: browserService,
+            stallDetector: stallDetector,
+            driftDetector: driftDetector,
+            environment: environment
+        )
+
+        let targetAgent: AgentProfile
+        let effectiveCaps: Set<AgentCapability>?
+        let taskTitle: String
+        let taskInstructions: String
+        let replySenderKind: ChatSenderKind
+
+        switch incoming.channelKind {
+        case .direct(let agentID):
+            guard let matched = agents.first(where: { $0.id == agentID }) else {
+                throw ControlPlaneError.invalidInput("Target agent '\(agentID.uuidString)' does not belong to project.")
+            }
+            targetAgent = matched
+            effectiveCaps = nil
+            replySenderKind = matched.role == .orchestrator ? .orchestrator : .agent
+            taskTitle = "Chat: \(String(incoming.content.prefix(64)))"
+            taskInstructions = """
+            DIRECT_CHAT
+            Channel: \(incoming.channelKey)
+            Project: \(project.name)
+            Workspace: \(project.workspaceRoot.path)
+            ReferencedFiles: \(incoming.referencedFiles.joined(separator: ", "))
+            RecentChatHistory:
+            \(recentTranscript)
+            UserMessage: \(incoming.content)
+            """
+
+        case .crew:
+            let coordinator = agents.first(where: { $0.role == .orchestrator }) ?? agents[0]
+            targetAgent = coordinator
+            effectiveCaps = agents.reduce(into: Set<AgentCapability>()) { $0.formUnion($1.capabilities) }
+            replySenderKind = coordinator.role == .orchestrator ? .orchestrator : .agent
+            let rosterLines = agents.map { a in
+                let caps = a.capabilities.map(\.rawValue).sorted().joined(separator: ",")
+                return "- \(a.name) (\(a.role.rawValue), caps: [\(caps)]): \(a.goal)"
+            }.joined(separator: "\n")
+            taskTitle = "Crew Chat: \(String(incoming.content.prefix(64)))"
+            taskInstructions = """
+            CREW_CHAT
+            Channel: crew
+            Project: \(project.name)
+            Goal: \(project.goal)
+            Workspace: \(project.workspaceRoot.path)
+            CrewRoster:
+            \(rosterLines)
+            ReferencedFiles: \(incoming.referencedFiles.joined(separator: ", "))
+            RecentChatHistory:
+            \(recentTranscript)
+            UserMessage: \(incoming.content)
+            """
+        }
+
+        var chatTask = DelegatedTask(
+            projectID: projectID,
+            assignedAgentID: targetAgent.id,
+            createdByAgentID: agents.first(where: { $0.role == .orchestrator })?.id,
+            title: taskTitle,
+            instructions: taskInstructions,
+            status: .running,
+            startedAt: Date(),
+            taskKind: .chat
+        )
+        try await database.insertTask(chatTask)
+        try await database.appendEvent(RunEvent(
+            projectID: projectID,
+            agentID: targetAgent.id,
+            taskID: chatTask.id,
+            kind: .taskDelegated,
+            summary: "Dispatched chat task '\(chatTask.title)' to \(targetAgent.name)",
+            trustLevel: .orchestratorVerified
+        ))
+
+        while true {
+            let outcome = await workerRunner.executeAttempt(
+                project: project,
+                agent: targetAgent,
+                task: chatTask,
+                stepIndex: chatTask.attemptCount + 1,
+                maxTurns: 12,
+                allowHumanDecisionTool: false,
+                effectiveCapabilitiesOverride: effectiveCaps
+            )
+
+            switch outcome {
+            case .completed(let summary, let sharedWrites, let artifactPaths):
+                for item in sharedWrites {
+                    let req = SharedStateWriteRequest(
+                        projectID: projectID,
+                        taskID: chatTask.id,
+                        scope: .projectShared,
+                        ownerAgentID: targetAgent.id,
+                        category: .fact,
+                        key: item.key,
+                        title: item.title,
+                        content: item.value,
+                        provenance: ProvenanceRecord(
+                            source: targetAgent.role == .orchestrator ? .orchestrator : .workerAgent,
+                            authorAgentID: targetAgent.id
+                        )
+                    )
+                    do {
+                        _ = try await sharedStateStore.write(req)
+                    } catch let ssErr as SharedStateError {
+                        if case .untrustedModificationRejected(_, let trust) = ssErr, trust == .untrustedData {
+                            chatTask.status = .needsHuman
+                            chatTask.errorSummary = ssErr.localizedDescription
+                            chatTask.updatedAt = Date()
+                            try? await database.updateTask(chatTask)
+                            try? await database.updateAgentState(id: targetAgent.id, state: .exception)
+                        } else {
+                            let alert = ExceptionAlert(
+                                projectID: projectID,
+                                taskID: chatTask.id,
+                                agentID: targetAgent.id,
+                                kind: .drift,
+                                severity: .critical,
+                                title: "Protected Shared-State Write Rejected",
+                                summary: ssErr.localizedDescription,
+                                suggestedOptions: ["redirect", "abort"],
+                                dedupKey: "chat_shared_state_drift:\(chatTask.id.uuidString)"
+                            )
+                            _ = try? await humanDecisionGate.triggerHold(alert: alert)
+                        }
+                        throw ssErr
+                    } catch {
+                        let alert = ExceptionAlert(
+                            projectID: projectID,
+                            taskID: chatTask.id,
+                            agentID: targetAgent.id,
+                            kind: .drift,
+                            severity: .critical,
+                            title: "Protected Shared-State Write Rejected",
+                            summary: error.localizedDescription,
+                            suggestedOptions: ["redirect", "abort"],
+                            dedupKey: "chat_shared_state_drift:\(chatTask.id.uuidString)"
+                        )
+                        _ = try? await humanDecisionGate.triggerHold(alert: alert)
+                        throw error
+                    }
+                }
+                let replyContent = summary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    ? "Completed request in \(project.workspaceRoot.lastPathComponent)."
+                    : summary
+                chatTask.status = .done
+                chatTask.resultSummary = replyContent
+                chatTask.errorSummary = nil
+                chatTask.artifactPaths.append(contentsOf: artifactPaths)
+                chatTask.completedAt = Date()
+                chatTask.updatedAt = Date()
+                try await database.updateTask(chatTask)
+                try await database.updateAgentState(id: targetAgent.id, state: .completed)
+                try await database.appendEvent(RunEvent(
+                    projectID: projectID,
+                    agentID: targetAgent.id,
+                    taskID: chatTask.id,
+                    kind: .taskCompleted,
+                    summary: "Chat task '\(chatTask.title)' completed: \(replyContent)",
+                    trustLevel: .orchestratorVerified
+                ))
+                return [
+                    ChatMessage(
+                        projectID: projectID,
+                        channelKind: incoming.channelKind,
+                        senderKind: replySenderKind,
+                        senderAgentID: targetAgent.id,
+                        senderName: targetAgent.name,
+                        content: replyContent,
+                        referencedFiles: artifactPaths,
+                        relatedTaskID: chatTask.id
+                    ),
+                ]
+
+            case .retryableError(let toolName, _, let message):
+                if Task.isCancelled || toolName == "cancelled" {
+                    chatTask.status = .cancelled
+                    chatTask.errorSummary = message
+                    chatTask.updatedAt = Date()
+                    try? await database.updateTask(chatTask)
+                    try? await database.updateAgentState(id: targetAgent.id, state: .idle)
+                    throw CancellationError()
+                }
+                chatTask.attemptCount += 1
+                chatTask.errorSummary = message
+                chatTask.updatedAt = Date()
+                if chatTask.attemptCount < chatTask.maxAttempts {
+                    chatTask.status = .running
+                    chatTask.instructions += "\n[Self-Correction attempt \(chatTask.attemptCount)]: Fix prior issue: \(message)"
+                    try await database.updateTask(chatTask)
+                    try await database.appendEvent(RunEvent(
+                        projectID: projectID,
+                        agentID: targetAgent.id,
+                        taskID: chatTask.id,
+                        kind: .taskSelfCorrected,
+                        summary: "Self-correcting chat task '\(chatTask.title)' (attempt \(chatTask.attemptCount)): \(message)",
+                        trustLevel: .orchestratorVerified
+                    ))
+                    continue
+                }
+                chatTask.status = .failed
+                try? await database.updateTask(chatTask)
+                try? await database.updateAgentState(id: targetAgent.id, state: .idle)
+                try? await database.appendEvent(RunEvent(
+                    projectID: projectID,
+                    agentID: targetAgent.id,
+                    taskID: chatTask.id,
+                    kind: .taskFailed,
+                    summary: "Chat task '\(chatTask.title)' failed: \(message)",
+                    trustLevel: .orchestratorVerified
+                ))
+                throw LLMProviderError.invalidResponse(message)
+
+            case .hold(let kind, let severity, let title, let summary, let options):
+                let existingOpen = (try? await database.listExceptions(projectID: projectID, openOnly: true)) ?? []
+                if kind == .drift,
+                   existingOpen.contains(where: { $0.dedupKey.hasPrefix("untrusted_tamper:\(projectID.uuidString):") }) {
+                    chatTask.status = .needsHuman
+                    chatTask.errorSummary = summary
+                    chatTask.updatedAt = Date()
+                    try? await database.updateTask(chatTask)
+                    try? await database.updateAgentState(id: targetAgent.id, state: .exception)
+                } else {
+                    let alert = ExceptionAlert(
+                        projectID: projectID,
+                        taskID: chatTask.id,
+                        agentID: targetAgent.id,
+                        kind: kind,
+                        severity: severity,
+                        title: title,
+                        summary: summary,
+                        suggestedOptions: options,
+                        dedupKey: "chat_\(kind.rawValue):\(chatTask.id.uuidString)"
+                    )
+                    _ = try? await humanDecisionGate.triggerHold(alert: alert)
+                }
+                throw LLMProviderError.networkFailure("\(title): \(summary)")
+            }
+        }
     }
 
     private func mapProjectStatus(_ status: ProjectStatus) -> RunOutcomeStatus {
@@ -1012,5 +1388,22 @@ public actor OrchestratorActor {
             )
             _ = try await humanDecisionGate.triggerHold(alert: alert)
         }
+    }
+
+    private static func resolveChatChannel(for task: DelegatedTask) -> ChatChannelKind {
+        for rawLine in task.instructions.split(whereSeparator: \.isNewline) {
+            let trimmedLine = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmedLine.hasPrefix("Channel:") {
+                let key = String(trimmedLine.dropFirst("Channel:".count))
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if let parsed = ChatChannelKind(channelKey: key) {
+                    return parsed
+                }
+            }
+        }
+        if task.title.hasPrefix("Crew Chat:") {
+            return .crew
+        }
+        return .direct(agentID: task.assignedAgentID)
     }
 }

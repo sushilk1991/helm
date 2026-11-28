@@ -7,22 +7,11 @@ public struct DetailInspectorView: View {
     @State private var draftAgentID: UUID?
     @State private var draftGoal: String = ""
     @State private var draftPersonality: AgentPersonality = .calmCommander
-    @State private var draftPersonalityNotes: String = ""
+    @State private var draftSystemPrompt: String = ""
     @State private var draftBackend: LLMBackendKind = .claudeCLI
-    @State private var draftCapabilities: Set<AgentCapability> = []
     @State private var isSaving: Bool = false
     @State private var justSaved: Bool = false
     @State private var saveError: String?
-
-    private let orderedCapabilities: [AgentCapability] = [
-        .codeExec,
-        .browser,
-        .ocr,
-        .readSharedState,
-        .proposeSharedState,
-        .delegateTasks,
-        .requestHumanDecision,
-    ]
 
     public init(store: HelmWorkspaceStore) {
         self.store = store
@@ -30,7 +19,7 @@ public struct DetailInspectorView: View {
 
     public var body: some View {
         VStack(spacing: 0) {
-            // Aligned Native macOS Inspector Header (Title + Clean Top-Right Close + Full-Width Segmented Tabs)
+            // Inspector Header
             VStack(spacing: 10) {
                 HStack {
                     Text(store.selectedAgent?.name ?? "Inspector")
@@ -68,7 +57,7 @@ public struct DetailInspectorView: View {
             Divider().overlay(HelmSurface.line)
 
             ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
+                VStack(alignment: .leading, spacing: 14) {
                     switch store.inspectorTab {
                     case .agent:
                         agentTabContent
@@ -78,10 +67,11 @@ public struct DetailInspectorView: View {
                         timelineTabContent
                     }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(16)
             }
         }
-        .frame(width: 344)
+        .frame(width: 380)
         .background(HelmSurface.sidebar)
         .overlay(alignment: .leading) {
             Rectangle()
@@ -105,9 +95,8 @@ public struct DetailInspectorView: View {
             draftAgentID = agent.id
             draftGoal = agent.goal
             draftPersonality = agent.personality
-            draftPersonalityNotes = agent.personalityNotes
+            draftSystemPrompt = agent.systemPrompt
             draftBackend = agent.backend
-            draftCapabilities = agent.capabilities
             saveError = nil
             justSaved = false
         }
@@ -117,13 +106,12 @@ public struct DetailInspectorView: View {
         draftAgentID == agent.id && (
             draftGoal.trimmingCharacters(in: .whitespacesAndNewlines) != agent.goal ||
             draftPersonality != agent.personality ||
-            draftPersonalityNotes.trimmingCharacters(in: .whitespacesAndNewlines) != agent.personalityNotes ||
-            draftBackend != agent.backend ||
-            draftCapabilities != agent.capabilities
+            draftSystemPrompt.trimmingCharacters(in: .whitespacesAndNewlines) != agent.systemPrompt ||
+            draftBackend != agent.backend
         )
     }
 
-    // MARK: - Tab 1: Selected Agent & Lead Configuration
+    // MARK: - Tab 1: Selected Agent & Editable System Prompt
 
     @ViewBuilder
     private var agentTabContent: some View {
@@ -136,12 +124,12 @@ public struct DetailInspectorView: View {
                     AgentCharacterCanvas(
                         seed: agent.characterSeed,
                         state: agent.activityState,
-                        size: 74,
+                        size: 68,
                         showStageBacking: true,
                         interactive: true
                     )
 
-                    VStack(spacing: 3) {
+                    VStack(spacing: 4) {
                         HStack(spacing: 6) {
                             Text(agent.name)
                                 .font(.title3.weight(.bold))
@@ -160,40 +148,26 @@ public struct DetailInspectorView: View {
                             .foregroundStyle(HelmInk.secondary)
                     }
 
-                    AgentStatusBadge(state: agent.activityState)
+                    HStack(spacing: 8) {
+                        AgentStatusBadge(state: agent.activityState)
+
+                        Button {
+                            store.selectAgent(agent.id, openDirectChat: true, openInspector: false)
+                        } label: {
+                            Label("1-on-1 Chat", systemImage: "bubble.left.fill")
+                                .font(.caption.weight(.medium))
+                                .fixedSize(horizontal: true, vertical: false)
+                        }
+                        .buttonStyle(HelmSecondaryButtonStyle())
+                    }
                 }
                 .frame(maxWidth: .infinity)
-                .padding(.vertical, 16)
+                .padding(.vertical, 14)
                 .padding(.horizontal, 14)
                 .helmCard(cornerRadius: HelmRadius.card)
 
-                // Personality & AI Provider Card (works for Lead AND every specialist!)
+                // Engine, Personality & Full Editable System Prompt
                 VStack(alignment: .leading, spacing: 12) {
-                    HStack {
-                        Label("Personality", systemImage: draftPersonality.symbolName)
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(HelmInk.primary)
-                        Spacer()
-                        Picker("Personality", selection: $draftPersonality) {
-                            ForEach(AgentPersonality.allCases, id: \.self) { p in
-                                Text(p.displayName).tag(p)
-                            }
-                        }
-                        .labelsHidden()
-                        .frame(width: 170)
-                    }
-
-                    Text(draftPersonality.tagline)
-                        .font(.caption)
-                        .foregroundStyle(HelmInk.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-
-                    TextField("Optional style note (e.g., concise, strict tests…)", text: $draftPersonalityNotes)
-                        .font(.caption)
-                        .textFieldStyle(.roundedBorder)
-
-                    Divider().overlay(HelmSurface.line)
-
                     HStack {
                         Label("AI Engine", systemImage: "cpu")
                             .font(.caption.weight(.semibold))
@@ -205,41 +179,84 @@ public struct DetailInspectorView: View {
                             }
                         }
                         .labelsHidden()
-                        .frame(width: 150)
+                        .frame(width: 170)
+                    }
+
+                    Divider().overlay(HelmSurface.line)
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Label("Personality", systemImage: draftPersonality.symbolName)
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(HelmInk.primary)
+                            Spacer()
+                            Picker("Personality", selection: $draftPersonality) {
+                                ForEach(AgentPersonality.allCases, id: \.self) { p in
+                                    Text(p.displayName).tag(p)
+                                }
+                            }
+                            .labelsHidden()
+                            .frame(width: 170)
+                        }
+
+                        Text(draftPersonality.tagline)
+                            .font(.caption)
+                            .foregroundStyle(HelmInk.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
 
                     Divider().overlay(HelmSurface.line)
 
                     VStack(alignment: .leading, spacing: 5) {
-                        Text("Mission")
+                        Text("Role Summary")
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(HelmInk.primary)
-                        TextField("Agent responsibility…", text: $draftGoal, axis: .vertical)
+                        TextField("Brief responsibility summary…", text: $draftGoal, axis: .vertical)
                             .font(.caption)
-                            .lineLimit(2...4)
+                            .lineLimit(2...3)
                             .textFieldStyle(.roundedBorder)
                     }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(14)
-                .helmCard(cornerRadius: HelmRadius.panel)
 
-                // Clear Plain-English Interactive Permissions
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack {
-                        Text("Permissions")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(HelmInk.primary)
-                        Spacer()
-                        Text("\(draftCapabilities.count) enabled")
-                            .font(.system(size: 10, weight: .medium))
-                            .foregroundStyle(HelmInk.muted)
-                    }
+                    Divider().overlay(HelmSurface.line)
 
-                    VStack(spacing: 8) {
-                        ForEach(orderedCapabilities, id: \.self) { cap in
-                            permissionRow(cap)
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack(alignment: .center) {
+                            Text("System Prompt")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(HelmInk.primary)
+                            Spacer()
+                            Button {
+                                draftSystemPrompt = AgentProfile.buildSystemPromptTemplate(
+                                    role: agent.role,
+                                    personality: draftPersonality,
+                                    goal: draftGoal,
+                                    notes: ""
+                                )
+                                justSaved = false
+                            } label: {
+                                Label("Apply Preset Template", systemImage: "wand.and.stars")
+                                    .font(.caption2.weight(.semibold))
+                                    .fixedSize(horizontal: true, vertical: false)
+                            }
+                            .buttonStyle(HelmSecondaryButtonStyle())
+                            .help("Populate a template from the selected personality without locking edits")
                         }
+
+                        TextEditor(text: $draftSystemPrompt)
+                            .font(.system(size: 12, design: .monospaced))
+                            .scrollContentBackground(.hidden)
+                            .padding(8)
+                            .frame(minHeight: 170, maxHeight: 260)
+                            .background(HelmSurface.well, in: RoundedRectangle(cornerRadius: HelmRadius.control, style: .continuous))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: HelmRadius.control, style: .continuous)
+                                    .strokeBorder(HelmSurface.line, lineWidth: 1)
+                            )
+
+                        Text("Edits apply directly to future turns. Changing Personality above never overwrites your prompt unless you click Apply Preset Template.")
+                            .font(.system(size: 10))
+                            .foregroundStyle(HelmInk.muted)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -279,6 +296,52 @@ public struct DetailInspectorView: View {
                     }
                 }
 
+                // Simplified Project-Level Workspace & Tool Access
+                if let project = store.selectedProject {
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack {
+                            Label("Workspace & Tool Access", systemImage: "folder.badge.gearshape")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(HelmInk.primary)
+                            Spacer()
+                        }
+
+                        Picker(
+                            "Sandbox Policy",
+                            selection: Binding(
+                                get: { project.sandboxTrustPolicy },
+                                set: { newPolicy in
+                                    Task {
+                                        do {
+                                            try await store.updateProjectTrustPolicy(newPolicy, projectID: project.id)
+                                        } catch {
+                                            saveError = error.localizedDescription
+                                        }
+                                    }
+                                }
+                            )
+                        ) {
+                            ForEach(SandboxTrustPolicy.allCases, id: \.self) { policy in
+                                Text(policy.displayName).tag(policy)
+                            }
+                        }
+                        .pickerStyle(.menu)
+
+                        Text(project.sandboxTrustPolicy.summary)
+                            .font(.caption)
+                            .foregroundStyle(HelmInk.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+
+                        Text("Agents operate directly against \(project.workspaceRoot.lastPathComponent) with their role tools under this project-level trust policy.")
+                            .font(.system(size: 10))
+                            .foregroundStyle(HelmInk.muted)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(14)
+                    .helmCard(cornerRadius: HelmRadius.panel)
+                }
+
                 // Private Memory
                 if !store.selectedAgentPrivateMemory.isEmpty {
                     VStack(alignment: .leading, spacing: 10) {
@@ -309,7 +372,7 @@ public struct DetailInspectorView: View {
                 Text("Select an agent")
                     .font(.callout.weight(.semibold))
                     .foregroundStyle(HelmInk.primary)
-                Text("Click any bot card on the workspace stage to edit its personality, AI engine, mission, and permissions.")
+                Text("Click the slider button on any crew card to edit its system prompt, personality, AI engine, and project trust policy.")
                     .font(.caption)
                     .foregroundStyle(HelmInk.secondary)
                     .multilineTextAlignment(.center)
@@ -319,57 +382,28 @@ public struct DetailInspectorView: View {
         }
     }
 
-    private func permissionRow(_ cap: AgentCapability) -> some View {
-        let isOn = draftCapabilities.contains(cap)
-
-        return HStack(alignment: .top, spacing: 10) {
-            Image(systemName: cap.symbolName)
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(isOn ? HelmAccent.primary : HelmInk.muted)
-                .frame(width: 24, height: 24)
-                .background((isOn ? HelmAccent.primarySoft : HelmSurface.well), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
-
-            VStack(alignment: .leading, spacing: 1) {
-                Text(cap.displayName)
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(isOn ? HelmInk.primary : HelmInk.secondary)
-                Text(cap.humanDescription)
-                    .font(.system(size: 10))
-                    .foregroundStyle(HelmInk.muted)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
-            Spacer(minLength: 4)
-
-            Toggle("", isOn: Binding(
-                get: { draftCapabilities.contains(cap) },
-                set: { enabled in
-                    if enabled {
-                        draftCapabilities.insert(cap)
-                    } else {
-                        draftCapabilities.remove(cap)
-                    }
-                    justSaved = false
-                }
-            ))
-            .toggleStyle(.switch)
-            .controlSize(.mini)
-            .labelsHidden()
-        }
-    }
-
     private func saveAgentChanges(_ agent: AgentProfile) {
+        let trimmedGoal = draftGoal.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedPrompt = draftSystemPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedGoal.isEmpty else {
+            saveError = "Role summary cannot be empty."
+            return
+        }
+        guard !trimmedPrompt.isEmpty else {
+            saveError = "System prompt cannot be empty."
+            return
+        }
+
         isSaving = true
         saveError = nil
         Task {
             do {
                 try await store.updateAgent(
                     agentID: agent.id,
-                    goal: draftGoal,
+                    goal: trimmedGoal,
                     backend: draftBackend,
                     personality: draftPersonality,
-                    personalityNotes: draftPersonalityNotes,
-                    capabilities: draftCapabilities
+                    systemPrompt: trimmedPrompt
                 )
                 isSaving = false
                 justSaved = true
@@ -380,14 +414,73 @@ public struct DetailInspectorView: View {
         }
     }
 
-    // MARK: - Tab 2: Live Sandbox & Headless Browser Output
+    // MARK: - Tab 2: Live Agent Work & Sandbox / Browser Diagnostics
 
     private var activityTabContent: some View {
         let exec = store.selectedLatestExecutionResult
         let obs = store.selectedLatestBrowserObservation
         let artifacts = Array(store.selectedProjectArtifacts.suffix(5).reversed())
+        let agentEntries: [AgentWorkEntry] = {
+            if let project = store.selectedProject {
+                let scoped = store.workFeed(forProject: project.id, agentID: store.selectedAgent?.id)
+                let source = scoped.isEmpty ? store.workFeed(forProject: project.id, agentID: nil) : scoped
+                return Array(source.suffix(6).reversed())
+            }
+            return []
+        }()
 
         return VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Label("Recent Agent Work", systemImage: "bolt.horizontal.circle")
+                        .font(.callout.weight(.semibold))
+                        .foregroundStyle(HelmInk.primary)
+                    Spacer()
+                    if let agent = store.selectedAgent {
+                        MetadataTag(agent.name)
+                    }
+                }
+
+                if agentEntries.isEmpty {
+                    Text("No live steps recorded yet. Steps, tool calls, and touched files will appear here as agents run.")
+                        .font(.caption)
+                        .foregroundStyle(HelmInk.muted)
+                        .padding(12)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .helmCard(cornerRadius: HelmRadius.panel)
+                } else {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(agentEntries) { entry in
+                            VStack(alignment: .leading, spacing: 4) {
+                                HStack(spacing: 6) {
+                                    Text(entry.agentName)
+                                        .font(.caption.weight(.semibold))
+                                        .foregroundStyle(HelmInk.primary)
+                                    MetadataTag("Step \(entry.stepNumber)", monospaced: true)
+                                    Spacer()
+                                    Text(entry.createdAt, format: .dateTime.hour().minute().second())
+                                        .font(.system(size: 10, design: .monospaced))
+                                        .foregroundStyle(HelmInk.muted)
+                                }
+                                Text(entry.summary)
+                                    .font(.caption)
+                                    .foregroundStyle(HelmInk.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                if let toolName = entry.toolName, !toolName.isEmpty {
+                                    Text("\(toolName): \(entry.toolOutputSummary ?? entry.toolInputSummary ?? "")")
+                                        .font(.system(size: 10, design: .monospaced))
+                                        .foregroundStyle(HelmInk.muted)
+                                        .lineLimit(2)
+                                }
+                            }
+                            .padding(10)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(HelmSurface.well, in: RoundedRectangle(cornerRadius: HelmRadius.control, style: .continuous))
+                        }
+                    }
+                }
+            }
+
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
                     Label("Sandbox Output", systemImage: "terminal")
@@ -526,7 +619,7 @@ public struct DetailInspectorView: View {
 
         return VStack(alignment: .leading, spacing: 10) {
             if events.isEmpty {
-                Text("No activity recorded yet. Start the watch to see milestones and task completions here.")
+                Text("No activity recorded yet. Start the watch or send a message in chat to see milestones here.")
                     .font(.caption)
                     .foregroundStyle(HelmInk.muted)
                     .padding(16)
@@ -566,7 +659,7 @@ public struct DetailInspectorView: View {
         case .projectCreated: return "Project Created"
         case .projectStarted: return "Watch Started"
         case .projectPaused: return "Watch Paused"
-        case .projectHeld: return "Needs Decision"
+        case .projectHeld: return "Paused for Review"
         case .projectCompleted: return "Project Completed"
         case .agentAdded: return "Agent Joined"
         case .agentStateChanged: return "Agent Updated"
@@ -579,8 +672,8 @@ public struct DetailInspectorView: View {
         case .sharedStateWritten: return "Memory Updated"
         case .sharedStateRejected: return "Memory Guard"
         case .heartbeatSteadyOK: return "Quiet Check-In"
-        case .exceptionRaised: return "Exception Surfaced"
-        case .exceptionResolved: return "Exception Resolved"
+        case .exceptionRaised: return "Alert Surfaced"
+        case .exceptionResolved: return "Alert Resolved"
         case .recoveryReconciled: return "Recovered"
         }
     }

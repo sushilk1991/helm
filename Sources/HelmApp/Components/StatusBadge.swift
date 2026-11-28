@@ -32,6 +32,7 @@ public struct StatusPill: View {
             Capsule()
                 .strokeBorder(color.opacity(0.22), lineWidth: 0.75)
         )
+        .fixedSize(horizontal: true, vertical: false)
     }
 }
 
@@ -109,9 +110,9 @@ public struct ProjectStatusBadge: View {
     private var label: String {
         switch status {
         case .idle: return "Ready"
-        case .running: return "Steady Watch"
+        case .running: return "Running"
         case .paused: return "Paused"
-        case .held: return "Needs Decision"
+        case .held: return "Attention"
         case .completed: return "Completed"
         case .failed: return "Fault"
         }

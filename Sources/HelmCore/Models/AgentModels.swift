@@ -150,7 +150,7 @@ public enum LLMBackendKind: String, Codable, Sendable, CaseIterable {
         case "mock": return .mock
         case "claude", "claudecli", "claude_cli": return .claudeCLI
         case "codex", "codexcli", "codex_cli": return .codexCLI
-        case "agy", "agycli", "agy_cli", "antigravity", "tigravity": return .agyCLI
+        case "agy", "agycli", "agy_cli", "antigravity": return .agyCLI
         case "pi", "picli", "pi_cli", "pycli", "py_cli", "pyagent", "piagent": return .piCLI
         case "http", "directhttp", "direct_http": return .directHTTP
         case "foundation", "foundationmodels", "foundation_models": return .foundationModels
@@ -193,6 +193,109 @@ public struct AgentCharacterSeed: Codable, Sendable, Equatable, Hashable {
 }
 
 public struct AgentProfile: Codable, Sendable, Identifiable, Equatable, Hashable {
+    public struct RolePreset: Sendable, Identifiable, Hashable {
+        public var id: String { role.rawValue }
+        public let role: AgentRole
+        public let name: String
+        public let goal: String
+        public let defaultPersonality: AgentPersonality
+        public let capabilities: Set<AgentCapability>
+
+        public init(
+            role: AgentRole,
+            name: String,
+            goal: String,
+            defaultPersonality: AgentPersonality,
+            capabilities: Set<AgentCapability>
+        ) {
+            self.role = role
+            self.name = name
+            self.goal = goal
+            self.defaultPersonality = defaultPersonality
+            self.capabilities = capabilities
+        }
+
+        public static let orchestrator = RolePreset(
+            role: .orchestrator,
+            name: "Helm Orchestrator",
+            goal: "Coordinate the project crew, decompose tasks, track shared state, and drive work to completion.",
+            defaultPersonality: .calmCommander,
+            capabilities: [.readSharedState, .proposeSharedState, .delegateTasks]
+        )
+
+        public static let coder = RolePreset(
+            role: .coder,
+            name: "Forge Coder",
+            goal: "Implement, edit, and verify project files and tests directly inside the project folder.",
+            defaultPersonality: .pragmaticBuilder,
+            capabilities: [.codeExec, .readSharedState, .proposeSharedState]
+        )
+
+        public static let researcher = RolePreset(
+            role: .researcher,
+            name: "Chart Researcher",
+            goal: "Inspect project files and specifications, synthesize findings into shared state, and verify facts.",
+            defaultPersonality: .methodicalArchitect,
+            capabilities: [.readSharedState, .proposeSharedState]
+        )
+
+        public static let browserAnalyst = RolePreset(
+            role: .browserAnalyst,
+            name: "Lookout Browser",
+            goal: "Navigate web targets headlessly, extract OCR/DOM observations, and report findings.",
+            defaultPersonality: .rapidOperator,
+            capabilities: [.browser, .ocr, .readSharedState, .proposeSharedState]
+        )
+
+        public static let qaVerifier = RolePreset(
+            role: .qaVerifier,
+            name: "Harbor Verifier",
+            goal: "Independently run build, test, and verification checks against the project folder and confirm acceptance criteria.",
+            defaultPersonality: .adversarialReviewer,
+            capabilities: [.codeExec, .browser, .ocr, .readSharedState, .proposeSharedState]
+        )
+
+        public static let specialist = RolePreset(
+            role: .specialist,
+            name: "Harbor Specialist",
+            goal: "Execute domain-specific tasks autonomously using the project folder and shared state.",
+            defaultPersonality: .creativeExplorer,
+            capabilities: [.readSharedState, .proposeSharedState]
+        )
+
+        public static let allPresets: [RolePreset] = [
+            .orchestrator,
+            .coder,
+            .researcher,
+            .browserAnalyst,
+            .qaVerifier,
+            .specialist,
+        ]
+
+        public static func preset(for role: AgentRole) -> RolePreset {
+            switch role {
+            case .orchestrator: return .orchestrator
+            case .coder: return .coder
+            case .researcher: return .researcher
+            case .browserAnalyst: return .browserAnalyst
+            case .qaVerifier: return .qaVerifier
+            case .specialist: return .specialist
+            }
+        }
+
+        public func buildSystemPrompt(
+            personality: AgentPersonality? = nil,
+            notes: String = ""
+        ) -> String {
+            AgentProfile.buildSystemPromptTemplate(
+                role: role,
+                personality: personality ?? defaultPersonality,
+                goal: goal,
+                notes: notes
+            )
+        }
+    }
+
     public let id: UUID
     public let projectID: UUID
     public var name: String
@@ -200,6 +303,7 @@ public struct AgentProfile: Codable, Sendable, Identifiable, Equatable, Hashable
     public var goal: String
     public var personality: AgentPersonality
     public var personalityNotes: String
+    public var systemPrompt: String
     public var capabilities: Set<AgentCapability>
     public var backend: LLMBackendKind
     public var modelOverride: String?
@@ -216,7 +320,8 @@ public struct AgentProfile: Codable, Sendable, Identifiable, Equatable, Hashable
         goal: String,
         personality: AgentPersonality? = nil,
         personalityNotes: String = "",
-        capabilities: Set<AgentCapability> = [.readSharedState, .proposeSharedState, .requestHumanDecision],
+        systemPrompt: String? = nil,
+        capabilities: Set<AgentCapability> = [.readSharedState, .proposeSharedState],
         backend: LLMBackendKind = .claudeCLI,
         modelOverride: String? = nil,
         activityState: AgentActivityState = .idle,
@@ -224,13 +329,23 @@ public struct AgentProfile: Codable, Sendable, Identifiable, Equatable, Hashable
         createdAt: Date = Date(),
         updatedAt: Date = Date()
     ) {
+        let resolvedPersonality = personality ?? AgentPersonality.defaultForRole(role)
+        let trimmedSystemPrompt = systemPrompt?.trimmingCharacters(in: .whitespacesAndNewlines)
         self.id = id
         self.projectID = projectID
         self.name = name
         self.role = role
         self.goal = goal
-        self.personality = personality ?? AgentPersonality.defaultForRole(role)
+        self.personality = resolvedPersonality
         self.personalityNotes = personalityNotes
+        self.systemPrompt = (trimmedSystemPrompt?.isEmpty == false)
+            ? trimmedSystemPrompt!
+            : Self.buildSystemPromptTemplate(
+                role: role,
+                personality: resolvedPersonality,
+                goal: goal,
+                notes: personalityNotes
+            )
         self.capabilities = capabilities
         self.backend = backend
         self.modelOverride = modelOverride
@@ -240,8 +355,28 @@ public struct AgentProfile: Codable, Sendable, Identifiable, Equatable, Hashable
         self.updatedAt = updatedAt
     }
 
+    public static func buildSystemPromptTemplate(
+        role: AgentRole,
+        personality: AgentPersonality,
+        goal: String,
+        notes: String = ""
+    ) -> String {
+        let trimmedGoal = goal.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedNotes = notes.trimmingCharacters(in: .whitespacesAndNewlines)
+        var lines: [String] = [
+            "Role: \(role.rawValue)",
+            "Style (\(personality.displayName)): \(personality.promptDirective)",
+            "Mission: \(trimmedGoal.isEmpty ? RolePreset.preset(for: role).goal : trimmedGoal)",
+            "Autonomy: Work directly from the attached project folder and available tools. Inspect files, run checks, and complete tasks end-to-end without pausing for routine clarifications.",
+        ]
+        if !trimmedNotes.isEmpty {
+            lines.append("Operator Notes: \(trimmedNotes)")
+        }
+        return lines.joined(separator: "\n")
+    }
+
     private enum CodingKeys: String, CodingKey {
-        case id, projectID, name, role, goal, personality, personalityNotes
+        case id, projectID, name, role, goal, personality, personalityNotes, systemPrompt
         case capabilities, backend, modelOverride, activityState, characterSeed, createdAt, updatedAt
     }
 
@@ -249,14 +384,27 @@ public struct AgentProfile: Codable, Sendable, Identifiable, Equatable, Hashable
         let c = try decoder.container(keyedBy: CodingKeys.self)
         let id = try c.decode(UUID.self, forKey: .id)
         let role = try c.decode(AgentRole.self, forKey: .role)
+        let goal = try c.decode(String.self, forKey: .goal)
+        let personality = try c.decodeIfPresent(AgentPersonality.self, forKey: .personality)
+            ?? AgentPersonality.defaultForRole(role)
+        let personalityNotes = try c.decodeIfPresent(String.self, forKey: .personalityNotes) ?? ""
+        let decodedPrompt = try c.decodeIfPresent(String.self, forKey: .systemPrompt)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         self.id = id
         self.projectID = try c.decode(UUID.self, forKey: .projectID)
         self.name = try c.decode(String.self, forKey: .name)
         self.role = role
-        self.goal = try c.decode(String.self, forKey: .goal)
-        self.personality = try c.decodeIfPresent(AgentPersonality.self, forKey: .personality)
-            ?? AgentPersonality.defaultForRole(role)
-        self.personalityNotes = try c.decodeIfPresent(String.self, forKey: .personalityNotes) ?? ""
+        self.goal = goal
+        self.personality = personality
+        self.personalityNotes = personalityNotes
+        self.systemPrompt = (decodedPrompt?.isEmpty == false)
+            ? decodedPrompt!
+            : Self.buildSystemPromptTemplate(
+                role: role,
+                personality: personality,
+                goal: goal,
+                notes: personalityNotes
+            )
         self.capabilities = try c.decode(Set<AgentCapability>.self, forKey: .capabilities)
         self.backend = try c.decode(LLMBackendKind.self, forKey: .backend)
         self.modelOverride = try c.decodeIfPresent(String.self, forKey: .modelOverride)
@@ -267,3 +415,5 @@ public struct AgentProfile: Codable, Sendable, Identifiable, Equatable, Hashable
         self.updatedAt = try c.decode(Date.self, forKey: .updatedAt)
     }
 }
+
+public typealias AgentRoleTemplate = AgentProfile.RolePreset

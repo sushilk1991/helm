@@ -190,6 +190,67 @@ public struct RunEvent: Codable, Sendable, Identifiable, Equatable, Hashable {
     }
 }
 
+public enum AgentWorkPhase: String, Codable, Sendable, CaseIterable, Hashable {
+    case planning
+    case reasoning
+    case toolCall
+    case fileEdit
+    case completed
+    case failed
+}
+
+public struct AgentWorkEntry: Identifiable, Codable, Sendable, Equatable, Hashable {
+    public let id: UUID
+    public let projectID: UUID
+    public let agentID: UUID
+    public let agentName: String
+    public let taskID: UUID?
+    public let taskTitle: String?
+    public let stepNumber: Int
+    public let phase: AgentWorkPhase
+    public let summary: String
+    public let toolName: String?
+    public let toolInputSummary: String?
+    public let toolOutputSummary: String?
+    public let touchedFiles: [String]
+    public let artifactPaths: [String]
+    public let createdAt: Date
+
+    public init(
+        id: UUID = UUID(),
+        projectID: UUID,
+        agentID: UUID,
+        agentName: String,
+        taskID: UUID? = nil,
+        taskTitle: String? = nil,
+        stepNumber: Int,
+        phase: AgentWorkPhase,
+        summary: String,
+        toolName: String? = nil,
+        toolInputSummary: String? = nil,
+        toolOutputSummary: String? = nil,
+        touchedFiles: [String] = [],
+        artifactPaths: [String] = [],
+        createdAt: Date = Date()
+    ) {
+        self.id = id
+        self.projectID = projectID
+        self.agentID = agentID
+        self.agentName = agentName
+        self.taskID = taskID
+        self.taskTitle = taskTitle
+        self.stepNumber = stepNumber
+        self.phase = phase
+        self.summary = summary
+        self.toolName = toolName
+        self.toolInputSummary = toolInputSummary
+        self.toolOutputSummary = toolOutputSummary
+        self.touchedFiles = touchedFiles
+        self.artifactPaths = artifactPaths
+        self.createdAt = createdAt
+    }
+}
+
 public enum SimulatedConditionKind: String, Codable, Sendable, CaseIterable {
     case stall
     case drift

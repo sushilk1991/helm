@@ -213,7 +213,7 @@ public actor SeatbeltSandboxRunner: SandboxExecutor {
 
         var denySubpaths: [String] = []
         for h in Set([home, canonicalHome]) {
-            for rel in [".ssh", ".aws", ".hermes", "Library/Keychains"] {
+            for rel in [".ssh", ".aws", ".gnupg", "Library/Keychains"] {
                 denySubpaths.append(escapeSBPLString((h as NSString).appendingPathComponent(rel)))
             }
         }

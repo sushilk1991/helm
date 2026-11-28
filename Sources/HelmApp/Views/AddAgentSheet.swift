@@ -1,72 +1,7 @@
 import HelmCore
 import SwiftUI
 
-public struct AgentRolePreset: Sendable, Equatable {
-    public let name: String
-    public let goal: String
-    public let capabilities: Set<AgentCapability>
-
-    public static func preset(for role: AgentRole) -> AgentRolePreset {
-        switch role {
-        case .researcher:
-            return AgentRolePreset(
-                name: "Chart Researcher",
-                goal: "Investigate specifications, synthesize facts into shared state, and verify sources.",
-                capabilities: [.readSharedState, .proposeSharedState, .requestHumanDecision]
-            )
-        case .coder:
-            return AgentRolePreset(
-                name: "Forge Coder",
-                goal: "Implement and test workspace artifacts inside the isolated sandbox.",
-                capabilities: [.codeExec, .readSharedState, .proposeSharedState, .requestHumanDecision]
-            )
-        case .browserAnalyst:
-            return AgentRolePreset(
-                name: "Lookout Browser",
-                goal: "Navigate web targets headlessly, extract OCR/DOM observations, and report findings.",
-                capabilities: [.browser, .ocr, .readSharedState, .proposeSharedState, .requestHumanDecision]
-            )
-        case .qaVerifier:
-            return AgentRolePreset(
-                name: "Harbor Verifier",
-                goal: "Independently run verification checks in isolation and confirm acceptance criteria.",
-                capabilities: [.codeExec, .browser, .ocr, .readSharedState, .requestHumanDecision]
-            )
-        case .specialist:
-            return AgentRolePreset(
-                name: "Harbor Specialist",
-                goal: "Execute domain-specific tasks and collaborate via verified shared state.",
-                capabilities: [.readSharedState, .proposeSharedState, .requestHumanDecision]
-            )
-        case .orchestrator:
-            return AgentRolePreset(
-                name: "Helm Orchestrator",
-                goal: "Coordinate specialists, track shared state, and surface exceptions only when human intervention is needed.",
-                capabilities: [.readSharedState, .proposeSharedState, .delegateTasks, .requestHumanDecision]
-            )
-        }
-    }
-
-    public static func apply(
-        role: AgentRole,
-        name: inout String,
-        goal: inout String,
-        capabilities: inout Set<AgentCapability>,
-        lastAutoName: inout String,
-        lastAutoGoal: inout String
-    ) {
-        let preset = Self.preset(for: role)
-        if name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || name == lastAutoName {
-            name = preset.name
-            lastAutoName = preset.name
-        }
-        if goal.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || goal == lastAutoGoal {
-            goal = preset.goal
-            lastAutoGoal = preset.goal
-        }
-        capabilities = preset.capabilities
-    }
-}
+public typealias AgentRolePreset = AgentProfile.RolePreset
 
 public struct AddAgentSheet: View {
     @Bindable var store: HelmWorkspaceStore
@@ -77,19 +12,16 @@ public struct AddAgentSheet: View {
     @State private var role: AgentRole = .researcher
     @State private var goal: String = ""
     @State private var personality: AgentPersonality = .methodicalArchitect
-    @State private var personalityNotes: String = ""
+    @State private var systemPrompt: String = ""
     @State private var lastAutoName: String = ""
     @State private var lastAutoGoal: String = ""
+    @State private var lastAutoSystemPrompt: String = ""
     @State private var backend: LLMBackendKind = .claudeCLI
-    @State private var capabilities: Set<AgentCapability> = [.readSharedState, .proposeSharedState, .requestHumanDecision]
     @State private var previewSeed: AgentCharacterSeed = AgentCharacterSeed(agentID: UUID(), isOrchestrator: false)
     @State private var validationError: String?
     @State private var isSubmitting: Bool = false
 
     private let selectableRoles: [AgentRole] = [.researcher, .coder, .browserAnalyst, .qaVerifier, .specialist]
-    private let orderedCapabilities: [AgentCapability] = [
-        .codeExec, .browser, .ocr, .readSharedState, .proposeSharedState, .delegateTasks, .requestHumanDecision,
-    ]
 
     public init(store: HelmWorkspaceStore, projectID: UUID) {
         self.store = store
@@ -106,6 +38,10 @@ public struct AddAgentSheet: View {
         }
     }
 
+    private var activeProject: Project? {
+        store.projects.first(where: { $0.id == projectID }) ?? store.selectedProject
+    }
+
     public var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
@@ -114,7 +50,7 @@ public struct AddAgentSheet: View {
                     AgentCharacterCanvas(
                         seed: previewSeed,
                         state: previewState,
-                        size: 68,
+                        size: 64,
                         showStageBacking: true,
                         interactive: true
                     )
@@ -123,7 +59,7 @@ public struct AddAgentSheet: View {
                         Text("Deploy Specialized Agent")
                             .font(.title3.weight(.bold))
                             .foregroundStyle(HelmInk.primary)
-                        Text("Assign a role, personality, AI engine, and clear permissions.")
+                        Text("Assign a role, personality, AI engine, and editable system prompt.")
                             .font(.caption)
                             .foregroundStyle(HelmInk.secondary)
                         Button {
@@ -156,8 +92,9 @@ public struct AddAgentSheet: View {
                             }
                             .labelsHidden()
                             .onChange(of: role) { _, newRole in
-                                applyPreset(for: newRole)
-                                personality = AgentPersonality.defaultForRole(newRole)
+                                let resolvedPersonality = AgentPersonality.defaultForRole(newRole)
+                                personality = resolvedPersonality
+                                applyPreset(for: newRole, personality: resolvedPersonality)
                             }
                         }
 
@@ -200,66 +137,69 @@ public struct AddAgentSheet: View {
                         }
 
                         VStack(alignment: .leading, spacing: 4) {
-                            Text("Custom Style Note (optional)")
+                            Text("Role Summary")
                                 .font(.caption.weight(.semibold))
                                 .foregroundStyle(HelmInk.secondary)
-                            TextField("e.g., Blunt, test-first, Swift 6", text: $personalityNotes)
+                            TextField("Describe this agent's responsibility…", text: $goal)
                                 .textFieldStyle(.roundedBorder)
                         }
                     }
 
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Responsibility")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(HelmInk.secondary)
-                        TextField("Describe this agent's specific responsibility…", text: $goal, axis: .vertical)
-                            .lineLimit(2...3)
-                            .textFieldStyle(.roundedBorder)
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Text("System Prompt")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(HelmInk.secondary)
+                            Spacer()
+                            Button {
+                                let generated = AgentProfile.buildSystemPromptTemplate(
+                                    role: role,
+                                    personality: personality,
+                                    goal: goal,
+                                    notes: ""
+                                )
+                                systemPrompt = generated
+                                lastAutoSystemPrompt = generated
+                            } label: {
+                                Label("Apply Preset Template", systemImage: "wand.and.stars")
+                                    .font(.caption2.weight(.semibold))
+                            }
+                            .buttonStyle(HelmSecondaryButtonStyle())
+                        }
+
+                        TextEditor(text: $systemPrompt)
+                            .font(.system(size: 12, design: .monospaced))
+                            .scrollContentBackground(.hidden)
+                            .padding(8)
+                            .frame(minHeight: 140, maxHeight: 210)
+                            .background(HelmSurface.well, in: RoundedRectangle(cornerRadius: HelmRadius.control, style: .continuous))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: HelmRadius.control, style: .continuous)
+                                    .strokeBorder(HelmSurface.line, lineWidth: 1)
+                            )
+
+                        Text("Customize instructions freely. Changing Personality never locks or overwrites your custom prompt.")
+                            .font(.system(size: 10))
+                            .foregroundStyle(HelmInk.muted)
                     }
 
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Permissions")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(HelmInk.secondary)
-
-                        VStack(spacing: 8) {
-                            ForEach(orderedCapabilities, id: \.self) { cap in
-                                let isOn = capabilities.contains(cap)
-                                HStack(alignment: .top, spacing: 10) {
-                                    Image(systemName: cap.symbolName)
-                                        .font(.system(size: 12, weight: .semibold))
-                                        .foregroundStyle(isOn ? HelmAccent.primary : HelmInk.muted)
-                                        .frame(width: 24, height: 24)
-                                        .background((isOn ? HelmAccent.primarySoft : HelmSurface.well), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
-
-                                    VStack(alignment: .leading, spacing: 1) {
-                                        Text(cap.displayName)
-                                            .font(.caption.weight(.semibold))
-                                            .foregroundStyle(isOn ? HelmInk.primary : HelmInk.secondary)
-                                        Text(cap.humanDescription)
-                                            .font(.system(size: 10))
-                                            .foregroundStyle(HelmInk.muted)
-                                    }
-
-                                    Spacer()
-
-                                    Toggle("", isOn: Binding(
-                                        get: { capabilities.contains(cap) },
-                                        set: { enabled in
-                                            if enabled {
-                                                capabilities.insert(cap)
-                                            } else {
-                                                capabilities.remove(cap)
-                                            }
-                                        }
-                                    ))
-                                    .toggleStyle(.switch)
-                                    .controlSize(.mini)
-                                    .labelsHidden()
-                                }
+                    if let project = activeProject {
+                        HStack(alignment: .top, spacing: 10) {
+                            Image(systemName: "folder.badge.gearshape")
+                                .font(.callout)
+                                .foregroundStyle(HelmAccent.primary)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Workspace & Tool Access · \(project.sandboxTrustPolicy.displayName)")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(HelmInk.primary)
+                                Text("Uses \(project.workspaceRoot.lastPathComponent) directly under project policy: \(project.sandboxTrustPolicy.summary).")
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(HelmInk.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
                             }
                         }
-                        .padding(12)
+                        .padding(11)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                         .helmCard(cornerRadius: HelmRadius.panel)
                     }
                 }
@@ -292,31 +232,48 @@ public struct AddAgentSheet: View {
         .background(HelmSurface.canvas)
         .onAppear {
             backend = store.defaultBackend
-            applyPreset(for: role)
-            personality = AgentPersonality.defaultForRole(role)
+            let initialPersonality = AgentPersonality.defaultForRole(role)
+            personality = initialPersonality
+            applyPreset(for: role, personality: initialPersonality)
         }
     }
 
-    private func applyPreset(for role: AgentRole) {
-        AgentRolePreset.apply(
-            role: role,
-            name: &name,
-            goal: &goal,
-            capabilities: &capabilities,
-            lastAutoName: &lastAutoName,
-            lastAutoGoal: &lastAutoGoal
-        )
+    private func applyPreset(for role: AgentRole, personality: AgentPersonality) {
+        let preset = AgentProfile.RolePreset.preset(for: role)
+        if name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || name == lastAutoName {
+            name = preset.name
+            lastAutoName = preset.name
+        }
+        if goal.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || goal == lastAutoGoal {
+            goal = preset.goal
+            lastAutoGoal = preset.goal
+        }
+        if systemPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || systemPrompt == lastAutoSystemPrompt {
+            let generated = AgentProfile.buildSystemPromptTemplate(
+                role: role,
+                personality: personality,
+                goal: goal,
+                notes: ""
+            )
+            systemPrompt = generated
+            lastAutoSystemPrompt = generated
+        }
     }
 
     private func submit() {
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedGoal = goal.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedPrompt = systemPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedName.isEmpty else {
             validationError = "Agent name cannot be empty."
             return
         }
         guard !trimmedGoal.isEmpty else {
-            validationError = "Agent goal cannot be empty."
+            validationError = "Agent role summary cannot be empty."
+            return
+        }
+        guard !trimmedPrompt.isEmpty else {
+            validationError = "System prompt cannot be empty."
             return
         }
 
@@ -330,9 +287,8 @@ public struct AddAgentSheet: View {
                     role: role,
                     goal: trimmedGoal,
                     backend: backend,
-                    capabilities: capabilities,
                     personality: personality,
-                    personalityNotes: personalityNotes
+                    systemPrompt: trimmedPrompt
                 )
                 dismiss()
             } catch {

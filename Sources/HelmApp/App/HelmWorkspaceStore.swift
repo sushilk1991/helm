@@ -81,6 +81,28 @@ public enum InspectorTab: String, CaseIterable, Identifiable, Sendable {
     public var id: String { rawValue }
 }
 
+public enum WorkspaceSecondaryTab: String, CaseIterable, Identifiable, Sendable {
+    case liveWork = "Live Work"
+    case tasks = "Tasks"
+    case memory = "Memory"
+
+    public var id: String { rawValue }
+}
+
+public struct ChatSendOutcome: Sendable, Equatable {
+    public let succeeded: Bool
+    public let didPersistUserMessage: Bool
+
+    public var shouldRestoreDraft: Bool {
+        !succeeded && !didPersistUserMessage
+    }
+
+    public init(succeeded: Bool, didPersistUserMessage: Bool) {
+        self.succeeded = succeeded
+        self.didPersistUserMessage = didPersistUserMessage
+    }
+}
+
 @MainActor
 @Observable
 public final class HelmWorkspaceStore {
@@ -96,6 +118,10 @@ public final class HelmWorkspaceStore {
     public var selectedAgentID: UUID?
     public var isInspectorVisible: Bool = false
     public var inspectorTab: InspectorTab = .agent
+    public var secondaryTab: WorkspaceSecondaryTab = .liveWork
+    public var activeChatChannelByProject: [UUID: ChatChannelKind] = [:]
+    public var workFeedFilterAgentIDByProject: [UUID: UUID?] = [:]
+    public var selectedTaskID: UUID?
     public var showNewProjectSheet: Bool = false
     public var showAddAgentSheet: Bool = false
     public var showSettingsSheet: Bool = false
@@ -130,6 +156,13 @@ public final class HelmWorkspaceStore {
     public var privateMemoryByAgent: [UUID: [SharedStateEntry]] = [:]
     public var eventsByProject: [UUID: [RunEvent]] = [:]
     public var artifactsByProject: [UUID: [ArtifactRecord]] = [:]
+    public var chatMessagesByProject: [UUID: [ChatMessage]] = [:]
+    public var pendingChatMessagesByProject: [UUID: [ChatMessage]] = [:]
+    public var sendingChatChannels: Set<String> = []
+    public var chatErrorByProject: [UUID: String] = [:]
+    public var lastChatSendOutcomeByProject: [UUID: ChatSendOutcome] = [:]
+    public var chatNavigationNonce: Int = 0
+    public var workFeedByProject: [UUID: [AgentWorkEntry]] = [:]
     public var latestBrowserObservationByProject: [UUID: BrowserObservation] = [:]
     public var latestExecutionResultByProject: [UUID: ExecutionResult] = [:]
     public var horizonPingCounterByProject: [UUID: Int] = [:]
@@ -142,6 +175,9 @@ public final class HelmWorkspaceStore {
     private var lastSteadyEventIDByProject: [UUID: UUID] = [:]
     private var lastExecutionEventIDByProject: [UUID: UUID] = [:]
     private var lastBrowserEventIDByProject: [UUID: UUID] = [:]
+    private var pendingBaselineIDsByMessageID: [UUID: Set<UUID>] = [:]
+    private var exactIDPendingMessageIDs: Set<UUID> = []
+    private var sendingChannelCounts: [String: Int] = [:]
 
     private static let onboardingKey = "helm.v1.onboardingCompleted"
     private static let defaultBackendKey = "helm.v1.defaultBackend"
@@ -193,6 +229,7 @@ public final class HelmWorkspaceStore {
             browserService: browser,
             environment: environment
         )
+        cp.enableAutonomousChatDispatch()
         let notif = NotificationCoordinator(arguments: arguments, environment: environment)
         let updater = AppUpdateManager(environment: environment, arguments: arguments)
         let authManager = CLIAuthManager(arguments: arguments, environment: environment)
@@ -313,6 +350,128 @@ public final class HelmWorkspaceStore {
 
     public var selectedProjectLatestEvent: RunEvent? {
         selectedProjectEvents.last
+    }
+
+    public var selectedChatChannel: ChatChannelKind {
+        guard let project = selectedProject else { return .crew }
+        let channel = activeChatChannelByProject[project.id] ?? .crew
+        if case .direct(let agentID) = channel,
+           !selectedProjectAgents.contains(where: { $0.id == agentID }) {
+            return .crew
+        }
+        return channel
+    }
+
+    internal static func unpersistedPendingMessages(
+        _ pending: [ChatMessage],
+        persisted: [ChatMessage],
+        baselineIDsByPendingID: [UUID: Set<UUID>] = [:],
+        exactIDMatchOnlyPendingIDs: Set<UUID> = []
+    ) -> [ChatMessage] {
+        let sortedPersisted = persisted.sorted {
+            if $0.createdAt == $1.createdAt {
+                return $0.id.uuidString < $1.id.uuidString
+            }
+            return $0.createdAt < $1.createdAt
+        }
+        let sortedPending = pending.sorted {
+            if $0.createdAt == $1.createdAt {
+                return $0.id.uuidString < $1.id.uuidString
+            }
+            return $0.createdAt < $1.createdAt
+        }
+        var consumedPersistedIDs: Set<UUID> = []
+        var remaining: [ChatMessage] = []
+
+        for candidate in sortedPending {
+            if let exact = sortedPersisted.first(where: { $0.id == candidate.id && !consumedPersistedIDs.contains($0.id) }) {
+                consumedPersistedIDs.insert(exact.id)
+                continue
+            }
+            if exactIDMatchOnlyPendingIDs.contains(candidate.id) {
+                remaining.append(candidate)
+                continue
+            }
+            if candidate.senderKind == .user {
+                let candidateTrimmed = candidate.content.trimmingCharacters(in: .whitespacesAndNewlines)
+                let windowStart = candidate.createdAt.addingTimeInterval(-2.0)
+                let excludedIDs = baselineIDsByPendingID[candidate.id] ?? []
+                if let matched = sortedPersisted.first(where: { msg in
+                    !consumedPersistedIDs.contains(msg.id)
+                        && !excludedIDs.contains(msg.id)
+                        && msg.senderKind == .user
+                        && msg.channelKind == candidate.channelKind
+                        && msg.content.trimmingCharacters(in: .whitespacesAndNewlines) == candidateTrimmed
+                        && msg.createdAt >= windowStart
+                }) {
+                    consumedPersistedIDs.insert(matched.id)
+                    continue
+                }
+            }
+            remaining.append(candidate)
+        }
+        return remaining
+    }
+
+    public func chatMessages(forProject projectID: UUID, channel: ChatChannelKind) -> [ChatMessage] {
+        let persisted = (chatMessagesByProject[projectID] ?? []).filter { $0.channelKind == channel }
+        let channelPending = (pendingChatMessagesByProject[projectID] ?? []).filter { $0.channelKind == channel }
+        let pending = Self.unpersistedPendingMessages(
+            channelPending,
+            persisted: persisted,
+            baselineIDsByPendingID: pendingBaselineIDsByMessageID,
+            exactIDMatchOnlyPendingIDs: exactIDPendingMessageIDs
+        )
+        return (persisted + pending).sorted {
+            if $0.createdAt == $1.createdAt {
+                return $0.id.uuidString < $1.id.uuidString
+            }
+            return $0.createdAt < $1.createdAt
+        }
+    }
+
+    public var selectedChatMessages: [ChatMessage] {
+        guard let project = selectedProject else { return [] }
+        return chatMessages(forProject: project.id, channel: selectedChatChannel)
+    }
+
+    public func isSendingChat(forProject projectID: UUID, channel: ChatChannelKind) -> Bool {
+        sendingChatChannels.contains("\(projectID.uuidString):\(channel.channelKey)")
+    }
+
+    public var isSendingSelectedChat: Bool {
+        guard let project = selectedProject else { return false }
+        return isSendingChat(forProject: project.id, channel: selectedChatChannel)
+    }
+
+    public var selectedChatError: String? {
+        guard let project = selectedProject else { return nil }
+        return chatErrorByProject[project.id]
+    }
+
+    public func workFeed(forProject projectID: UUID, agentID: UUID? = nil) -> [AgentWorkEntry] {
+        let entries = workFeedByProject[projectID] ?? []
+        guard let agentID else { return entries }
+        return entries.filter { $0.agentID == agentID }
+    }
+
+    public var selectedWorkFeedFilterAgentID: UUID? {
+        guard let project = selectedProject,
+              let candidate = workFeedFilterAgentIDByProject[project.id] ?? nil,
+              selectedProjectAgents.contains(where: { $0.id == candidate }) else {
+            return nil
+        }
+        return candidate
+    }
+
+    public var selectedWorkFeed: [AgentWorkEntry] {
+        guard let project = selectedProject else { return [] }
+        return workFeed(forProject: project.id, agentID: selectedWorkFeedFilterAgentID)
+    }
+
+    public var selectedTask: DelegatedTask? {
+        guard let selectedTaskID else { return nil }
+        return selectedProjectTasks.first(where: { $0.id == selectedTaskID })
     }
 
     // MARK: - Onboarding, Settings & Safe Update Hooks
@@ -494,6 +653,10 @@ public final class HelmWorkspaceStore {
                !(controlPlane.agentsByProject[current.id] ?? []).contains(where: { $0.id == selectedAgentID }) {
                 selectedAgentID = (controlPlane.agentsByProject[current.id] ?? []).first?.id
             }
+            if let selectedTaskID,
+               !selectedProjectTasks.contains(where: { $0.id == selectedTaskID }) {
+                self.selectedTaskID = nil
+            }
         } catch {
             bannerErrorMessage = error.localizedDescription
         }
@@ -507,10 +670,70 @@ public final class HelmWorkspaceStore {
             let shared = try await controlPlane.listSharedState(projectID: projectID)
             let events = try await controlPlane.listEvents(projectID: projectID, limit: 200)
             let artifacts = try await controlPlane.database.listArtifacts(projectID: projectID)
+            var chatMessages = try await controlPlane.listChatMessages(projectID: projectID, channel: nil, limit: 200)
+            let activeChannel = activeChatChannelByProject[projectID] ?? .crew
+            let channelMessages = try await controlPlane.listChatMessages(projectID: projectID, channel: activeChannel, limit: 200)
+            if !channelMessages.isEmpty {
+                var seenChatIDs = Set(chatMessages.map(\.id))
+                var addedAny = false
+                for msg in channelMessages where seenChatIDs.insert(msg.id).inserted {
+                    chatMessages.append(msg)
+                    addedAny = true
+                }
+                if addedAny {
+                    chatMessages.sort {
+                        if $0.createdAt == $1.createdAt {
+                            return $0.id.uuidString < $1.id.uuidString
+                        }
+                        return $0.createdAt < $1.createdAt
+                    }
+                }
+            }
+
+            var workEntries = try await controlPlane.listAgentWorkFeed(projectID: projectID, agentID: nil, limit: 200)
+            if let filterAgentID = workFeedFilterAgentIDByProject[projectID] ?? nil {
+                let agentEntries = try await controlPlane.listAgentWorkFeed(projectID: projectID, agentID: filterAgentID, limit: 200)
+                if !agentEntries.isEmpty {
+                    var seenWorkIDs = Set(workEntries.map(\.id))
+                    var addedAny = false
+                    for entry in agentEntries where seenWorkIDs.insert(entry.id).inserted {
+                        workEntries.append(entry)
+                        addedAny = true
+                    }
+                    if addedAny {
+                        workEntries.sort {
+                            if $0.createdAt == $1.createdAt {
+                                if $0.stepNumber == $1.stepNumber {
+                                    return $0.id.uuidString < $1.id.uuidString
+                                }
+                                return $0.stepNumber < $1.stepNumber
+                            }
+                            return $0.createdAt < $1.createdAt
+                        }
+                    }
+                }
+            }
 
             sharedStateByProject[projectID] = shared
             eventsByProject[projectID] = events
             artifactsByProject[projectID] = artifacts
+            chatMessagesByProject[projectID] = chatMessages
+            workFeedByProject[projectID] = workEntries
+
+            if let pending = pendingChatMessagesByProject[projectID], !pending.isEmpty {
+                let remaining = Self.unpersistedPendingMessages(
+                    pending,
+                    persisted: chatMessages,
+                    baselineIDsByPendingID: pendingBaselineIDsByMessageID,
+                    exactIDMatchOnlyPendingIDs: exactIDPendingMessageIDs
+                )
+                let remainingIDs = Set(remaining.map(\.id))
+                for removed in pending where !remainingIDs.contains(removed.id) {
+                    pendingBaselineIDsByMessageID.removeValue(forKey: removed.id)
+                    exactIDPendingMessageIDs.remove(removed.id)
+                }
+                pendingChatMessagesByProject[projectID] = remaining.isEmpty ? nil : remaining
+            }
 
             let agents = controlPlane.agentsByProject[projectID] ?? []
             for agent in agents {
@@ -564,10 +787,75 @@ public final class HelmWorkspaceStore {
     public func selectProject(_ id: UUID) {
         selectedProjectID = id
         selectedAgentID = (controlPlane.agentsByProject[id] ?? []).first?.id
+        selectedTaskID = nil
         settleHelmCounter += 1
         Task {
             await refreshProjectDetails(projectID: id, notifyExceptions: false)
         }
+    }
+
+    public func selectChatChannel(_ channel: ChatChannelKind) {
+        guard let project = selectedProject else { return }
+        let resolved: ChatChannelKind
+        switch channel {
+        case .crew:
+            resolved = .crew
+        case .direct(let agentID):
+            if selectedProjectAgents.contains(where: { $0.id == agentID }) {
+                resolved = .direct(agentID: agentID)
+                selectedAgentID = agentID
+            } else {
+                resolved = .crew
+            }
+        }
+        activeChatChannelByProject[project.id] = resolved
+        chatErrorByProject[project.id] = nil
+        chatNavigationNonce += 1
+        let projectID = project.id
+        Task {
+            await refreshProjectDetails(projectID: projectID, notifyExceptions: false)
+        }
+    }
+
+    public func selectAgent(
+        _ agentID: UUID,
+        openDirectChat: Bool = true,
+        openInspector: Bool = false
+    ) {
+        selectedAgentID = agentID
+        if openDirectChat {
+            selectChatChannel(.direct(agentID: agentID))
+        }
+        if openInspector {
+            inspectorTab = .agent
+            isInspectorVisible = true
+        }
+    }
+
+    public func setWorkFeedFilter(agentID: UUID?) {
+        guard let project = selectedProject else { return }
+        let projectID = project.id
+        if let agentID, !selectedProjectAgents.contains(where: { $0.id == agentID }) {
+            workFeedFilterAgentIDByProject[projectID] = nil
+        } else {
+            workFeedFilterAgentIDByProject[projectID] = agentID
+        }
+        Task {
+            await refreshProjectDetails(projectID: projectID, notifyExceptions: false)
+        }
+    }
+
+    public func selectTask(_ taskID: UUID?) {
+        if let taskID, selectedProjectTasks.contains(where: { $0.id == taskID }) {
+            selectedTaskID = taskID
+        } else {
+            selectedTaskID = nil
+        }
+    }
+
+    public func openTaskInWorkspace(_ taskID: UUID) {
+        secondaryTab = .tasks
+        selectTask(taskID)
     }
 
     public func inspectAgent(_ agentID: UUID) {
@@ -657,24 +945,31 @@ public final class HelmWorkspaceStore {
         workspaceRoot: URL,
         backend: LLMBackendKind? = nil,
         leadPersonality: AgentPersonality = .calmCommander,
-        starterRoles: [AgentRole] = []
+        starterRoles: [AgentRole] = [],
+        sandboxTrustPolicy: SandboxTrustPolicy = .standardWorkspace
     ) async throws {
         let chosenBackend = backend ?? defaultBackend
         let resolvedName = name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             ? workspaceRoot.lastPathComponent
             : name.trimmingCharacters(in: .whitespacesAndNewlines)
-        let project = try await controlPlane.createProject(name: resolvedName, goal: goal, workspaceRoot: workspaceRoot)
+        let project = try await controlPlane.createProject(
+            name: resolvedName,
+            goal: goal,
+            workspaceRoot: workspaceRoot,
+            sandboxTrustPolicy: sandboxTrustPolicy
+        )
+        let leadPreset = AgentProfile.RolePreset.orchestrator
         _ = try await controlPlane.addAgent(
             projectID: project.id,
             name: "Compass",
             role: .orchestrator,
-            goal: "Coordinate specialists, maintain shared memory, and alert you only when human judgment is needed.",
+            goal: leadPreset.goal,
             backend: chosenBackend,
-            capabilities: [.readSharedState, .proposeSharedState, .delegateTasks, .requestHumanDecision],
+            capabilities: leadPreset.capabilities,
             personality: leadPersonality
         )
         for role in starterRoles where role != .orchestrator {
-            let preset = AgentRolePreset.preset(for: role)
+            let preset = AgentProfile.RolePreset.preset(for: role)
             _ = try await controlPlane.addAgent(
                 projectID: project.id,
                 name: preset.name,
@@ -689,25 +984,41 @@ public final class HelmWorkspaceStore {
         selectProject(project.id)
     }
 
+    @discardableResult
+    public func updateProjectTrustPolicy(
+        _ policy: SandboxTrustPolicy,
+        projectID: UUID? = nil
+    ) async throws -> Project {
+        guard let targetID = projectID ?? selectedProject?.id else {
+            throw ControlPlaneError.invalidInput("No project selected.")
+        }
+        let updated = try await controlPlane.updateProjectTrustPolicy(projectID: targetID, policy: policy)
+        await reloadAll()
+        return updated
+    }
+
     public func addAgent(
         projectID: UUID,
         name: String,
         role: AgentRole,
         goal: String,
         backend: LLMBackendKind,
-        capabilities: Set<AgentCapability>,
+        capabilities: Set<AgentCapability>? = nil,
         personality: AgentPersonality? = nil,
-        personalityNotes: String = ""
+        personalityNotes: String = "",
+        systemPrompt: String? = nil
     ) async throws {
+        let resolvedCapabilities = capabilities ?? AgentProfile.RolePreset.preset(for: role).capabilities
         let agent = try await controlPlane.addAgent(
             projectID: projectID,
             name: name,
             role: role,
             goal: goal,
             backend: backend,
-            capabilities: capabilities,
+            capabilities: resolvedCapabilities,
             personality: personality ?? AgentPersonality.defaultForRole(role),
-            personalityNotes: personalityNotes
+            personalityNotes: personalityNotes,
+            systemPrompt: systemPrompt
         )
         await refreshProjectDetails(projectID: projectID, notifyExceptions: false)
         selectedAgentID = agent.id
@@ -720,7 +1031,9 @@ public final class HelmWorkspaceStore {
         backend: LLMBackendKind? = nil,
         personality: AgentPersonality? = nil,
         personalityNotes: String? = nil,
-        capabilities: Set<AgentCapability>? = nil
+        capabilities: Set<AgentCapability>? = nil,
+        modelOverride: String?? = nil,
+        systemPrompt: String? = nil
     ) async throws {
         let updated = try await controlPlane.updateAgent(
             agentID: agentID,
@@ -729,10 +1042,128 @@ public final class HelmWorkspaceStore {
             backend: backend,
             personality: personality,
             personalityNotes: personalityNotes,
-            capabilities: capabilities
+            capabilities: capabilities,
+            modelOverride: modelOverride,
+            systemPrompt: systemPrompt
         )
         await refreshProjectDetails(projectID: updated.projectID, notifyExceptions: false)
         selectedAgentID = updated.id
+    }
+
+    @discardableResult
+    public func sendChatMessage(
+        content: String,
+        to channel: ChatChannelKind? = nil,
+        referencedFiles: [String] = [],
+        relatedTaskID: UUID? = nil,
+        projectID: UUID? = nil
+    ) async -> Bool {
+        let outcome = await sendChatMessageWithOutcome(
+            content: content,
+            to: channel,
+            referencedFiles: referencedFiles,
+            relatedTaskID: relatedTaskID,
+            projectID: projectID
+        )
+        return outcome.succeeded
+    }
+
+    @discardableResult
+    public func sendChatMessageWithOutcome(
+        content: String,
+        to channel: ChatChannelKind? = nil,
+        referencedFiles: [String] = [],
+        relatedTaskID: UUID? = nil,
+        projectID: UUID? = nil
+    ) async -> ChatSendOutcome {
+        let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let targetProjectID = projectID ?? selectedProject?.id else {
+            return ChatSendOutcome(succeeded: false, didPersistUserMessage: false)
+        }
+        let targetChannel: ChatChannelKind
+        if let channel {
+            targetChannel = channel
+        } else if targetProjectID == selectedProject?.id {
+            targetChannel = selectedChatChannel
+        } else {
+            targetChannel = activeChatChannelByProject[targetProjectID] ?? .crew
+        }
+
+        chatErrorByProject[targetProjectID] = nil
+        let optimistic = ChatMessage(
+            projectID: targetProjectID,
+            channelKind: targetChannel,
+            senderKind: .user,
+            senderName: "You",
+            content: trimmed,
+            referencedFiles: referencedFiles,
+            relatedTaskID: relatedTaskID
+        )
+        var baselineIDs = Set((chatMessagesByProject[targetProjectID] ?? []).map(\.id))
+        if let cpMessages = controlPlane.chatMessagesByProject[targetProjectID] {
+            baselineIDs.formUnion(cpMessages.map(\.id))
+        }
+        pendingBaselineIDsByMessageID[optimistic.id] = baselineIDs
+        exactIDPendingMessageIDs.insert(optimistic.id)
+        pendingChatMessagesByProject[targetProjectID, default: []].append(optimistic)
+
+        let channelKey = "\(targetProjectID.uuidString):\(targetChannel.channelKey)"
+        sendingChannelCounts[channelKey, default: 0] += 1
+        sendingChatChannels.insert(channelKey)
+        defer {
+            let nextCount = (sendingChannelCounts[channelKey] ?? 0) - 1
+            if nextCount <= 0 {
+                sendingChannelCounts.removeValue(forKey: channelKey)
+                sendingChatChannels.remove(channelKey)
+            } else {
+                sendingChannelCounts[channelKey] = nextCount
+            }
+        }
+
+        pendingStartProjectIDs.insert(targetProjectID)
+        pollingGraceDeadline = Date().addingTimeInterval(3.0)
+        ensurePollingState(forceStart: true)
+
+        do {
+            _ = try await controlPlane.sendChatMessage(
+                projectID: targetProjectID,
+                channel: targetChannel,
+                content: trimmed,
+                referencedFiles: referencedFiles,
+                relatedTaskID: relatedTaskID,
+                messageID: optimistic.id
+            )
+            pendingChatMessagesByProject[targetProjectID]?.removeAll { $0.id == optimistic.id }
+            if pendingChatMessagesByProject[targetProjectID]?.isEmpty == true {
+                pendingChatMessagesByProject[targetProjectID] = nil
+            }
+            pendingBaselineIDsByMessageID.removeValue(forKey: optimistic.id)
+            exactIDPendingMessageIDs.remove(optimistic.id)
+            await refreshProjectDetails(projectID: targetProjectID, notifyExceptions: true)
+            ensurePollingState()
+            let outcome = ChatSendOutcome(succeeded: true, didPersistUserMessage: true)
+            lastChatSendOutcomeByProject[targetProjectID] = outcome
+            return outcome
+        } catch {
+            pendingChatMessagesByProject[targetProjectID]?.removeAll { $0.id == optimistic.id }
+            if pendingChatMessagesByProject[targetProjectID]?.isEmpty == true {
+                pendingChatMessagesByProject[targetProjectID] = nil
+            }
+            pendingBaselineIDsByMessageID.removeValue(forKey: optimistic.id)
+            exactIDPendingMessageIDs.remove(optimistic.id)
+            var didPersist = false
+            if let latestMessages = try? await controlPlane.listChatMessages(projectID: targetProjectID, channel: nil, limit: 200) {
+                chatMessagesByProject[targetProjectID] = latestMessages
+                await refreshProjectDetails(projectID: targetProjectID, notifyExceptions: false)
+                let persistedMessages = chatMessagesByProject[targetProjectID] ?? latestMessages
+                didPersist = persistedMessages.contains(where: { $0.id == optimistic.id })
+            }
+            chatErrorByProject[targetProjectID] = error.localizedDescription
+            ensurePollingState()
+            let outcome = ChatSendOutcome(succeeded: false, didPersistUserMessage: didPersist)
+            lastChatSendOutcomeByProject[targetProjectID] = outcome
+            return outcome
+        }
     }
 
     public func startSelectedProject() async {

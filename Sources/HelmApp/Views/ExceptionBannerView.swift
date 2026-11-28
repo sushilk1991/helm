@@ -9,6 +9,7 @@ public struct ExceptionBannerView: View {
 
     @State private var redirectNote: String = ""
     @State private var isRedirectExpanded: Bool = false
+    @State private var showFullDetail: Bool = false
 
     public init(
         alert: ExceptionAlert,
@@ -30,20 +31,24 @@ public struct ExceptionBannerView: View {
         alert.severity == .critical ? HelmSemantic.criticalSoft : HelmSemantic.attentionSoft
     }
 
+    private var allowsApprove: Bool {
+        alert.suggestedOptions.isEmpty || alert.suggestedOptions.contains("approve")
+    }
+
     public var body: some View {
-        VStack(alignment: .leading, spacing: HelmSpace.l) {
-            HStack(alignment: .top, spacing: HelmSpace.l) {
+        VStack(alignment: .leading, spacing: HelmSpace.m) {
+            HStack(alignment: .top, spacing: HelmSpace.m) {
                 if let agent = offendingAgent {
-                    AgentCharacterCanvas(seed: agent.characterSeed, state: .exception, size: 32)
+                    AgentCharacterCanvas(seed: agent.characterSeed, state: .exception, size: 28)
                 } else {
                     Image(systemName: alert.severity == .critical ? "exclamationmark.octagon.fill" : "exclamationmark.triangle.fill")
-                        .font(.title3)
+                        .font(.callout)
                         .foregroundStyle(accentColor)
-                        .frame(width: 32, height: 32)
+                        .frame(width: 28, height: 28)
                 }
 
                 VStack(alignment: .leading, spacing: HelmSpace.xs) {
-                    HStack(spacing: HelmSpace.m) {
+                    HStack(spacing: HelmSpace.s) {
                         StatusPill(
                             label: kindLabel(alert.kind),
                             symbol: alert.severity == .critical ? "exclamationmark.octagon.fill" : "exclamationmark.triangle.fill",
@@ -64,13 +69,24 @@ public struct ExceptionBannerView: View {
                     }
 
                     Text(alert.title)
-                        .font(.headline)
+                        .font(.callout.weight(.semibold))
                         .foregroundStyle(HelmInk.primary)
+                        .lineLimit(2)
 
                     Text(alert.diagnosticSummary)
-                        .font(.body)
+                        .font(.caption)
                         .foregroundStyle(HelmInk.secondary)
+                        .lineLimit(showFullDetail ? nil : 2)
                         .fixedSize(horizontal: false, vertical: true)
+
+                    if alert.diagnosticSummary.count > 120 {
+                        Button(showFullDetail ? "Show less" : "Show more") {
+                            showFullDetail.toggle()
+                        }
+                        .buttonStyle(.borderless)
+                        .font(.caption2.weight(.medium))
+                        .foregroundStyle(HelmAccent.primary)
+                    }
                 }
             }
 
@@ -88,11 +104,13 @@ public struct ExceptionBannerView: View {
                 }
             }
 
-            HStack(spacing: HelmSpace.m) {
-                Button("Approve") {
-                    onResolve(.approve)
+            HStack(spacing: HelmSpace.s) {
+                if allowsApprove {
+                    Button("Approve") {
+                        onResolve(.approve)
+                    }
+                    .buttonStyle(HelmPrimaryButtonStyle())
                 }
-                .buttonStyle(HelmPrimaryButtonStyle())
 
                 Button("Retry") {
                     onResolve(.retry)
@@ -118,14 +136,15 @@ public struct ExceptionBannerView: View {
                         onInspectAgent(agentID)
                     }
                     .buttonStyle(.borderless)
+                    .font(.caption.weight(.medium))
                     .foregroundStyle(HelmAccent.primary)
                 }
             }
         }
-        .padding(HelmSpace.xl)
-        .background(HelmSurface.elevated, in: RoundedRectangle(cornerRadius: HelmRadius.card, style: .continuous))
+        .padding(HelmSpace.l)
+        .background(HelmSurface.elevated, in: RoundedRectangle(cornerRadius: HelmRadius.panel, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: HelmRadius.card, style: .continuous)
+            RoundedRectangle(cornerRadius: HelmRadius.panel, style: .continuous)
                 .strokeBorder(accentColor.opacity(0.42), lineWidth: 1.0)
         )
     }
@@ -134,9 +153,9 @@ public struct ExceptionBannerView: View {
         switch kind {
         case .stall: return "Agent Stalled"
         case .loop: return "Loop Detected"
-        case .drift: return "Goal Drift"
+        case .drift: return "Boundary Drift"
         case .budget: return "Budget Hold"
-        case .humanDecision: return "Human Decision"
+        case .humanDecision: return "Approval Gate"
         case .coordinatorStalled: return "Watchdog Hold"
         case .providerFailure: return "Provider Fault"
         }

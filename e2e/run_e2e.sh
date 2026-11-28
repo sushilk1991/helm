@@ -12,6 +12,7 @@ STRICT=0
 JSON_OUT=""
 PATTERN=""
 VERBOSITY=2
+NO_BATON=0
 
 usage() {
   cat <<'EOF'
@@ -22,6 +23,7 @@ Options:
   --allow-unbuilt          Exit 0 when SKIP_UNBUILT > 0 and FAIL == 0
   --strict                 Treat SKIP_UNBUILT as FAIL (same as HELM_E2E_STRICT=1)
   --json-out <path>        Write JSON summary report to <path> (default: e2e/.reports/latest.json)
+  --no-baton               Run swiftc/python3 directly without wrapping in baton
   -k, --pattern <substr>   Filter test IDs by substring
   -v, --verbose            Increase verbosity
   -h, --help               Show this help message
@@ -53,6 +55,10 @@ while (( $# > 0 )); do
       JSON_OUT="$2"
       shift 2
       ;;
+    --no-baton)
+      NO_BATON=1
+      shift
+      ;;
     -k|--pattern)
       (( $# >= 2 )) || { echo "Missing value for $1" >&2; exit 1; }
       PATTERN="$2"
@@ -74,11 +80,23 @@ while (( $# > 0 )); do
   esac
 done
 
+run_with_baton() {
+  if (( NO_BATON == 0 )) \
+    && [[ "${BATON:-on}" != "off" ]] \
+    && [[ "${HELM_IN_BATON:-0}" != "1" ]] \
+    && [[ -z "${_BATON_LANES:-}" ]] \
+    && command -v baton >/dev/null 2>&1; then
+    HELM_IN_BATON=1 baton run --lane auto -- "$@"
+  else
+    "$@"
+  fi
+}
+
 mkdir -p "${BIN_DIR}" "${SCRIPT_DIR}/.reports"
 
 if [[ ! -x "${PROBE_BIN}" || "${PROBE_SRC}" -nt "${PROBE_BIN}" ]]; then
   echo "Compiling focus_probe.swift -> ${PROBE_BIN}..."
-  swiftc -O "${PROBE_SRC}" -o "${PROBE_BIN}"
+  run_with_baton swiftc -O "${PROBE_SRC}" -o "${PROBE_BIN}"
 fi
 
 typeset -a PY_ARGS
@@ -98,7 +116,7 @@ fi
 
 export PYTHONPATH="${SCRIPT_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
 set +e
-python3 "${PY_ARGS[@]}"
+run_with_baton python3 "${PY_ARGS[@]}"
 RC=$?
 set -e
 exit "${RC}"

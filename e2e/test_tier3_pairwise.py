@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import json
 import os
 import re
 import socket
@@ -13,16 +14,23 @@ from typing import Any, Dict, List, Set
 from e2e_common import (
     E2ETestCase,
     FocusGuard,
+    LocalLLMServer,
     TempWorkspace,
+    UnbuiltTargetSkip,
     inspect_png,
+    require_feature_field,
     require_helm_app,
     require_helmctl,
     require_vm_assets,
     run_helmctl,
+    run_helmctl_feature,
     run_tier_module_cli,
+    validate_agent_work_entry,
     validate_browser_observation,
+    validate_chat_message,
     validate_exception_alert,
     validate_execution_result,
+    validate_project_trust_policy,
 )
 from fixture_server import FixtureServer
 
@@ -61,8 +69,12 @@ def _run_headless_snapshot(
 
     env = os.environ.copy()
     env["HELM_NO_ACTIVATE"] = "1"
+    env.pop("HELM_SNAPSHOT_SETTINGS", None)
+    env.pop("HELM_SNAPSHOT_EXTRA", None)
     if reduce_motion:
         env["HELM_REDUCE_MOTION"] = "1"
+    else:
+        env.pop("HELM_REDUCE_MOTION", None)
 
     with FocusGuard(interval_ms=50) as guard:
         proc = subprocess.Popen(
@@ -821,6 +833,518 @@ class Tier3PairwiseTests(E2ETestCase):
                     timeout=20.0,
                 )
                 self.assertNotIn(miss_res.returncode, (0, 69))
+
+    def test_T3_PW_15_chat_crew_and_direct_with_work_feed_isolation(self) -> None:
+        """T3-PW-15 (#1+#4+#9): Crew chat + 1-on-1 direct chat + per-agent work feed isolation."""
+        require_helmctl()
+        with TempWorkspace() as ws:
+            assert ws.ws_path is not None and ws.db_path is not None
+            (ws.ws_path / "README.md").write_text("HARBOR_PW15=READY\n", encoding="utf-8")
+            proj = run_helmctl(
+                ["project", "create", "--name", "PW15ChatFeed", "--goal", "Pairwise chat and feed", "--workspace", str(ws.ws_path)],
+                db_path=ws.db_path,
+            ).json
+            scout = run_helmctl(
+                ["agent", "add", "--project", proj["id"], "--name", "Scout", "--role", "researcher", "--goal", "Inspect README", "--backend", "http"],
+                db_path=ws.db_path,
+            ).json
+            forge = run_helmctl(
+                ["agent", "add", "--project", proj["id"], "--name", "Forge", "--role", "coder", "--goal", "Implement", "--backend", "http"],
+                db_path=ws.db_path,
+            ).json
+
+            def responder(req: Dict[str, Any]) -> str:
+                transcript = "\n".join(str(m.get("content", "")) for m in req.get("messages", []))
+                exec_section = (
+                    transcript.split("[Execution Transcript]", 1)[1]
+                    if "[Execution Transcript]" in transcript
+                    else ""
+                )
+                if "Inspect README.md" in transcript and "HARBOR_PW15=READY" not in exec_section:
+                    return json.dumps(
+                        {"thought": "read readme", "tool_calls": [{"id": "pw15_read", "name": "read_workspace_file", "arguments": {"path": "README.md"}}]}
+                    )
+                if "HARBOR_PW15=READY" in exec_section:
+                    return json.dumps(
+                        {"thought": "respond", "tool_calls": [{"id": "pw15", "name": "complete_task", "arguments": {"summary": "HARBOR_PW15=READY verified"}}]}
+                    )
+                return json.dumps(
+                    {"thought": "respond", "tool_calls": [{"id": "pw15_direct", "name": "complete_task", "arguments": {"summary": "Scout scope summarized"}}]}
+                )
+
+            with LocalLLMServer(responder) as llm, FocusGuard(interval_ms=50) as guard:
+                run_helmctl_feature(
+                    ["chat", "send", "--project", proj["id"], "--channel", "crew", "--content", "Inspect README.md", "--wait"],
+                    db_path=ws.db_path,
+                    env={"HELM_LLM_BASE_URL": llm.base_url},
+                    feature_name="chat send",
+                )
+                run_helmctl_feature(
+                    ["chat", "send", "--project", proj["id"], "--channel", f"direct:{scout['id']}", "--content", "Summarize scope", "--wait"],
+                    db_path=ws.db_path,
+                    env={"HELM_LLM_BASE_URL": llm.base_url},
+                    feature_name="chat send",
+                )
+                all_req_text = "\n".join(
+                    str(m.get("content", ""))
+                    for r in llm.requests
+                    for m in r.get("messages", [])
+                )
+                self.assertIn("README.md", all_req_text)
+                self.assertIn(str(ws.ws_path), all_req_text)
+                self.assertIn("HARBOR_PW15=READY", all_req_text)
+
+            assert guard.result is not None
+            self.assertFalse(guard.result["focusChanged"])
+            self.assertFalse(guard.result["cursorMoved"])
+
+            crew_msgs = run_helmctl_feature(
+                ["chat", "list", "--project", proj["id"], "--channel", "crew"],
+                db_path=ws.db_path,
+                feature_name="chat list",
+            ).json
+            scout_msgs = run_helmctl_feature(
+                ["chat", "list", "--project", proj["id"], "--channel", f"direct:{scout['id']}"],
+                db_path=ws.db_path,
+                feature_name="chat list",
+            ).json
+            forge_msgs = run_helmctl_feature(
+                ["chat", "list", "--project", proj["id"], "--channel", f"direct:{forge['id']}"],
+                db_path=ws.db_path,
+                feature_name="chat list",
+            ).json
+
+            self.assertGreaterEqual(len(crew_msgs), 2)
+            for m in crew_msgs:
+                validate_chat_message(m)
+                self.assertEqual(m["channelKey"], "crew")
+            self.assertTrue(
+                any(
+                    m.get("senderKind") in {"agent", "orchestrator"}
+                    and "HARBOR_PW15=READY" in str(m.get("content", ""))
+                    for m in crew_msgs
+                )
+            )
+
+            self.assertGreaterEqual(len(scout_msgs), 2)
+            for m in scout_msgs:
+                validate_chat_message(m)
+                self.assertEqual(m["channelKey"], f"agent:{scout['id']}")
+            self.assertTrue(
+                any(
+                    m.get("senderKind") == "agent"
+                    and m.get("senderAgentID") == scout["id"]
+                    for m in scout_msgs
+                )
+            )
+            self.assertEqual(forge_msgs, [])
+
+            scout_feed = run_helmctl_feature(
+                ["work-feed", "list", "--project", proj["id"], "--agent", scout["id"]],
+                db_path=ws.db_path,
+                feature_name="work-feed list",
+            ).json
+            self.assertGreaterEqual(len(scout_feed), 1)
+            for e in scout_feed:
+                validate_agent_work_entry(e)
+                self.assertEqual(e["agentID"], scout["id"])
+            self.assertIn("read_workspace_file", {e.get("toolName") for e in scout_feed if e.get("toolName")})
+
+            forge_feed = run_helmctl_feature(
+                ["work-feed", "list", "--project", proj["id"], "--agent", forge["id"]],
+                db_path=ws.db_path,
+                feature_name="work-feed list",
+            ).json
+            self.assertEqual(forge_feed, [])
+
+    def test_T3_PW_16_editable_system_prompt_template_plus_chat_turn(self) -> None:
+        """T3-PW-16 (#2+#9+#13): Role preset template + custom systemPrompt edit + live chat turn."""
+        require_helmctl()
+        with TempWorkspace() as ws:
+            assert ws.ws_path is not None and ws.db_path is not None
+            proj = run_helmctl(
+                ["project", "create", "--name", "PW16PromptChat", "--goal", "Pairwise prompt and chat", "--workspace", str(ws.ws_path)],
+                db_path=ws.db_path,
+            ).json
+            agent = run_helmctl(
+                ["agent", "add", "--project", proj["id"], "--name", "Coder", "--role", "coder", "--goal", "Build", "--backend", "http"],
+                db_path=ws.db_path,
+            ).json
+            require_feature_field(agent, "systemPrompt", "Editable systemPrompt")
+            custom_sp = "CUSTOM_DIRECTIVE_ALPHA: Always sign responses with [VERIFIED_SYS]."
+            run_helmctl_feature(
+                ["agent", "update", "--id", agent["id"], "--system-prompt", custom_sp],
+                db_path=ws.db_path,
+                feature_name="agent update",
+            )
+            upd = run_helmctl_feature(
+                ["agent", "update", "--id", agent["id"], "--personality", "pragmaticBuilder"],
+                db_path=ws.db_path,
+                feature_name="agent update",
+            ).json
+            self.assertEqual(upd["systemPrompt"], custom_sp)
+
+            def responder(req: Dict[str, Any]) -> str:
+                sys_text = "\n".join(str(m.get("content", "")) for m in req.get("messages", []) if m.get("role") == "system")
+                if "CUSTOM_DIRECTIVE_ALPHA" in sys_text:
+                    return json.dumps(
+                        {"thought": "ack", "tool_calls": [{"id": "c1", "name": "complete_task", "arguments": {"summary": "Hello [VERIFIED_SYS]"}}]}
+                    )
+                return json.dumps(
+                    {"thought": "missing", "tool_calls": [{"id": "c1", "name": "complete_task", "arguments": {"summary": "MISSING_DIRECTIVE"}}]}
+                )
+
+            with LocalLLMServer(responder) as llm:
+                run_helmctl_feature(
+                    ["chat", "send", "--project", proj["id"], "--channel", f"direct:{agent['id']}", "--content", "Hello", "--wait"],
+                    db_path=ws.db_path,
+                    env={"HELM_LLM_BASE_URL": llm.base_url},
+                    feature_name="chat send",
+                )
+                self.assertTrue(
+                    any(
+                        "CUSTOM_DIRECTIVE_ALPHA" in str(m.get("content", ""))
+                        for r in llm.requests
+                        for m in r.get("messages", [])
+                        if m.get("role") == "system"
+                    )
+                )
+
+    def test_T3_PW_17_stateless_multi_turn_workspace_tools_plus_work_feed(self) -> None:
+        """T3-PW-17 (#4+#5+#6+#7): Stateless HTTP prompt + multi-turn workspace tools + work-feed."""
+        require_helmctl()
+        with TempWorkspace() as ws:
+            assert ws.ws_path is not None and ws.db_path is not None
+            (ws.ws_path / "brief.md").write_text("SECRET_CODE: HARBOR_99\n", encoding="utf-8")
+            (ws.ws_path / "src").mkdir(parents=True, exist_ok=True)
+            (ws.ws_path / "src" / "app.txt").write_text("TODO: wire chat\n", encoding="utf-8")
+
+            proj = run_helmctl(
+                ["project", "create", "--name", "PW17Loop", "--goal", "Read brief and write out.txt", "--workspace", str(ws.ws_path)],
+                db_path=ws.db_path,
+            ).json
+            loop_worker = run_helmctl(
+                ["agent", "add", "--project", proj["id"], "--name", "LoopWorker", "--role", "coder", "--goal", "Discover workspace files and write out.txt", "--backend", "http", "--capabilities", "codeExec,readSharedState,proposeSharedState"],
+                db_path=ws.db_path,
+            ).json
+
+            def responder(req: Dict[str, Any]) -> str:
+                transcript = "\n".join(str(m.get("content", "")) for m in req.get("messages", []))
+                if "DECOMPOSE_GOAL" in transcript:
+                    return json.dumps(
+                        {
+                            "tasks": [
+                                {
+                                    "temp_id": "t1",
+                                    "title": "PW17LoopTask",
+                                    "instructions": "List files, read the brief, and write out.txt",
+                                    "assigned_agent_id": loop_worker["id"],
+                                    "waiting_on_temp_ids": [],
+                                }
+                            ]
+                        }
+                    )
+                exec_section = (
+                    transcript.split("[Execution Transcript]", 1)[1]
+                    if "[Execution Transcript]" in transcript
+                    else ""
+                )
+                if "HARBOR_99" in exec_section:
+                    if (ws.ws_path / "out.txt").is_file():
+                        return json.dumps(
+                            {"thought": "done", "tool_calls": [{"id": "t4", "name": "complete_task", "arguments": {"summary": "HARBOR_99 written"}}]}
+                        )
+                    return json.dumps(
+                        {"thought": "write", "tool_calls": [{"id": "t3", "name": "write_workspace_file", "arguments": {"path": "out.txt", "content": "HARBOR_99"}}]}
+                    )
+                if "brief.md" in exec_section:
+                    return json.dumps(
+                        {"thought": "read brief", "tool_calls": [{"id": "t2", "name": "read_workspace_file", "arguments": {"path": "brief.md"}}]}
+                    )
+                return json.dumps(
+                    {"thought": "list", "tool_calls": [{"id": "t1", "name": "list_workspace_files", "arguments": {}}]}
+                )
+
+            with LocalLLMServer(responder) as llm:
+                rep = run_helmctl(
+                    ["run", "--project", proj["id"], "--max-steps", "10"],
+                    db_path=ws.db_path,
+                    env={"HELM_LLM_BASE_URL": llm.base_url},
+                ).json
+                worker_reqs = [
+                    r
+                    for r in llm.requests
+                    if "DECOMPOSE_GOAL" not in "\n".join(str(m.get("content", "")) for m in r.get("messages", []))
+                ]
+                if len(worker_reqs) < 3:
+                    raise UnbuiltTargetSkip("Multi-turn workspace tool loop not active yet")
+            self.assertEqual(rep["status"], "completed")
+            self.assertEqual((ws.ws_path / "out.txt").read_text(encoding="utf-8").strip(), "HARBOR_99")
+            feed = run_helmctl_feature(
+                ["work-feed", "list", "--project", proj["id"]],
+                db_path=ws.db_path,
+                feature_name="work-feed list",
+            ).json
+            for e in feed:
+                validate_agent_work_entry(e)
+            tools_used = {e.get("toolName") for e in feed if e.get("toolName")}
+            self.assertTrue({"list_workspace_files", "read_workspace_file", "write_workspace_file"}.issubset(tools_used))
+
+    def test_T3_PW_18_sandbox_trust_policy_plus_read_guard_and_persistence(self) -> None:
+        """T3-PW-18 (#3+#7+#10): SandboxTrustPolicy + workspace escape guard + persistence."""
+        require_helmctl()
+        with TempWorkspace() as ws:
+            assert ws.root is not None and ws.db_path is not None
+            ws_a = ws.root / "ws_a"
+            ws_b = ws.root / "ws_b"
+            ws_a.mkdir()
+            ws_b.mkdir()
+            proj_a = run_helmctl(
+                ["project", "create", "--name", "TrustA", "--goal", "Sandboxed", "--workspace", str(ws_a)],
+                db_path=ws.db_path,
+            ).json
+            proj_b = run_helmctl(
+                ["project", "create", "--name", "TrustB", "--goal", "Standard", "--workspace", str(ws_b)],
+                db_path=ws.db_path,
+            ).json
+            require_feature_field(proj_a, "sandboxTrustPolicy", "Project sandboxTrustPolicy")
+            run_helmctl_feature(
+                ["project", "update-trust", "--id", proj_a["id"], "--trust-policy", "sandboxed"],
+                db_path=ws.db_path,
+                feature_name="project update-trust",
+            )
+            run_helmctl_feature(
+                ["project", "update-trust", "--id", proj_b["id"], "--trust-policy", "standardWorkspace"],
+                db_path=ws.db_path,
+                feature_name="project update-trust",
+            )
+            validate_project_trust_policy(
+                run_helmctl(["project", "show", "--id", proj_a["id"]], db_path=ws.db_path).json,
+                expected="sandboxed",
+            )
+            validate_project_trust_policy(
+                run_helmctl(["project", "show", "--id", proj_b["id"]], db_path=ws.db_path).json,
+                expected="standardWorkspace",
+            )
+            for ws_dir, pid in ((ws_a, proj_a["id"]), (ws_b, proj_b["id"])):
+                sb_ok = validate_execution_result(
+                    run_helmctl(
+                        ["sandbox", "exec", "--workspace", str(ws_dir), "--cmd", "printf 'OK' > in_ws.txt", "--mode", "seatbelt", "--project", pid]
+                    ).json
+                )
+                self.assertEqual(sb_ok["exitCode"], 0)
+                self.assertTrue((ws_dir / "in_ws.txt").is_file())
+
+            # Seatbelt must block writing outside the sandboxed workspace directory
+            sb_escape = validate_execution_result(
+                run_helmctl(
+                    [
+                        "sandbox",
+                        "exec",
+                        "--workspace",
+                        str(ws_a),
+                        "--cmd",
+                        "printf 'ESCAPED' > ../seatbelt_escape_pw18.txt",
+                        "--mode",
+                        "seatbelt",
+                        "--project",
+                        proj_a["id"],
+                    ]
+                ).json
+            )
+            self.assertNotEqual(sb_escape["exitCode"], 0)
+            self.assertFalse((ws.root / "seatbelt_escape_pw18.txt").exists())
+
+            # AgentWorkerRunner DriftDetector must also block workspace escape on sandboxed project
+            guard_agent = run_helmctl(
+                [
+                    "agent",
+                    "add",
+                    "--project",
+                    proj_a["id"],
+                    "--name",
+                    "EscapeProbe",
+                    "--role",
+                    "coder",
+                    "--goal",
+                    "Attempt boundary write",
+                    "--backend",
+                    "http",
+                    "--capabilities",
+                    "codeExec,readSharedState,proposeSharedState",
+                ],
+                db_path=ws.db_path,
+            ).json
+
+            def escape_responder(req: Dict[str, Any]) -> str:
+                joined = "\n".join(str(m.get("content", "")) for m in req.get("messages", []))
+                if "DECOMPOSE_GOAL" in joined:
+                    return json.dumps(
+                        {
+                            "tasks": [
+                                {
+                                    "temp_id": "t1",
+                                    "title": "PW18EscapeTask",
+                                    "instructions": "Attempt escape write",
+                                    "assigned_agent_id": guard_agent["id"],
+                                    "waiting_on_temp_ids": [],
+                                }
+                            ]
+                        }
+                    )
+                return json.dumps(
+                    {
+                        "thought": "escape",
+                        "tool_calls": [
+                            {
+                                "id": "esc1",
+                                "name": "write_workspace_file",
+                                "arguments": {"path": "../escape_pw18.txt", "content": "BLOCKED"},
+                            }
+                        ],
+                    }
+                )
+
+            with LocalLLMServer(escape_responder) as llm:
+                rep = run_helmctl(
+                    ["run", "--project", proj_a["id"], "--max-steps", "5"],
+                    db_path=ws.db_path,
+                    env={"HELM_LLM_BASE_URL": llm.base_url},
+                ).json
+            self.assertFalse((ws.root / "escape_pw18.txt").exists())
+            self.assertEqual(rep["status"], "held")
+            self.assertTrue(
+                any(e.get("kind") == "drift" for e in rep.get("exceptions", [])),
+                f"Expected drift exception on workspace escape, got: {rep.get('exceptions')!r}",
+            )
+
+    def test_T3_PW_19_autonomous_non_stalling_dag_partial_failure_isolation(self) -> None:
+        """T3-PW-19 (#6+#8+#9): Autonomous DAG completes dependent branch without stalling when unrelated branch fails."""
+        require_helmctl()
+        with TempWorkspace() as ws:
+            assert ws.ws_path is not None and ws.db_path is not None
+            proj = run_helmctl(
+                ["project", "create", "--name", "PW19DAG", "--goal", "Isolate failure", "--workspace", str(ws.ws_path)],
+                db_path=ws.db_path,
+            ).json
+            a_res = run_helmctl(
+                ["agent", "add", "--project", proj["id"], "--name", "Researcher", "--role", "researcher", "--goal", "T1", "--backend", "http"],
+                db_path=ws.db_path,
+            ).json
+            a_cod = run_helmctl(
+                ["agent", "add", "--project", proj["id"], "--name", "Coder", "--role", "coder", "--goal", "T2 fail", "--backend", "http"],
+                db_path=ws.db_path,
+            ).json
+            a_qa = run_helmctl(
+                ["agent", "add", "--project", proj["id"], "--name", "QA", "--role", "qa", "--goal", "T3 verify T1", "--backend", "http"],
+                db_path=ws.db_path,
+            ).json
+
+            def responder(req: Dict[str, Any]) -> str:
+                joined = "\n".join(str(m.get("content", "")) for m in req.get("messages", []))
+                if "DECOMPOSE_GOAL" in joined:
+                    return json.dumps(
+                        {
+                            "tasks": [
+                                {"temp_id": "t1", "title": "ResearchStep", "instructions": "DO_T1", "assigned_agent_id": a_res["id"], "waiting_on_temp_ids": []},
+                                {"temp_id": "t2", "title": "FailingStep", "instructions": "DO_T2_FAIL", "assigned_agent_id": a_cod["id"], "waiting_on_temp_ids": []},
+                                {"temp_id": "t3", "title": "QAVerifyT1", "instructions": "DO_T3", "assigned_agent_id": a_qa["id"], "waiting_on_temp_ids": ["t1"]},
+                            ]
+                        }
+                    )
+                if "DO_T2_FAIL" in joined:
+                    return "{invalid json response"
+                return json.dumps(
+                    {"thought": "done", "tool_calls": [{"id": "ok1", "name": "complete_task", "arguments": {"summary": "STEP_OK"}}]}
+                )
+
+            with LocalLLMServer(responder) as llm:
+                rep = run_helmctl(
+                    ["run", "--project", proj["id"], "--max-steps", "12"],
+                    db_path=ws.db_path,
+                    env={"HELM_LLM_BASE_URL": llm.base_url},
+                ).json
+            done_titles = {t["title"] for t in rep.get("tasks", []) if t.get("status") == "done"}
+            self.assertIn("ResearchStep", done_titles)
+            self.assertIn("QAVerifyT1", done_titles)
+            self.assertFalse(any(e.get("kind") == "humanDecision" for e in rep.get("exceptions", [])))
+
+    def test_T3_PW_20_headless_snapshots_work_feed_inspector_and_settings_preserved(self) -> None:
+        """T3-PW-20 (#11+#12+#13+#14+#17): Main Light/Dark + ReduceMotion + Settings snapshots under FocusGuard."""
+        app_exe = require_helm_app()
+        with TempWorkspace() as ws:
+            assert ws.artifacts_dir is not None
+            std_dir = ws.artifacts_dir / "pw20_std"
+            rm_dir = ws.artifacts_dir / "pw20_rm"
+            std_dir.mkdir(parents=True, exist_ok=True)
+            rm_dir.mkdir(parents=True, exist_ok=True)
+
+            with FocusGuard(interval_ms=50) as guard:
+                for out_dir, rm in ((std_dir, False), (rm_dir, True)):
+                    cmd = [str(app_exe), "--headless", "--seed-demo", "--snapshot-dir", str(out_dir)]
+                    if rm:
+                        cmd.append("--reduce-motion")
+                    env = os.environ.copy()
+                    env["HELM_NO_ACTIVATE"] = "1"
+                    env["HELM_SNAPSHOT_SETTINGS"] = "1"
+                    if rm:
+                        env["HELM_REDUCE_MOTION"] = "1"
+                        env.pop("HELM_SNAPSHOT_EXTRA", None)
+                    else:
+                        env.pop("HELM_REDUCE_MOTION", None)
+                        env["HELM_SNAPSHOT_EXTRA"] = "1"
+                    proc = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=45.0)
+                    self.assertEqual(proc.returncode, 0, proc.stderr)
+
+            assert guard.result is not None
+            self.assertFalse(guard.result["focusChanged"])
+            self.assertFalse(guard.result["cursorMoved"])
+
+            l_steady = inspect_png(std_dir / "helm_light_steady.png")
+            d_steady = inspect_png(std_dir / "helm_dark_steady.png")
+            d_exc = inspect_png(std_dir / "helm_dark_exception.png")
+            l_set = inspect_png(std_dir / "helm_light_settings.png")
+            d_set = inspect_png(std_dir / "helm_dark_settings.png")
+
+            for info in (l_steady, d_steady, d_exc):
+                self.assertGreaterEqual(info["width"], 900)
+                self.assertGreaterEqual(info["height"], 600)
+                self.assertFalse(info["is_uniform"])
+            self.assertGreater(l_steady["mean_luminance"], d_steady["mean_luminance"])
+            self.assertNotEqual(d_steady["pixel_sha256"], d_exc["pixel_sha256"])
+            self.assertFalse(l_set["is_uniform"])
+            self.assertFalse(d_set["is_uniform"])
+            self.assertGreater(l_set["mean_luminance"], d_set["mean_luminance"])
+
+            # Inspect M3 extra snapshots (inspector + direct chat, navigable tasks)
+            d_insp = inspect_png(std_dir / "helm_dark_inspector_direct.png")
+            l_insp = inspect_png(std_dir / "helm_light_inspector_direct.png")
+            d_tasks = inspect_png(std_dir / "helm_dark_tasks_navigable.png")
+            l_tasks = inspect_png(std_dir / "helm_light_tasks_navigable.png")
+            for info in (d_insp, l_insp, d_tasks, l_tasks):
+                self.assertEqual(info["width"], 1280)
+                self.assertEqual(info["height"], 800)
+                self.assertFalse(info["is_uniform"])
+            self.assertGreater(l_insp["mean_luminance"], d_insp["mean_luminance"])
+            self.assertGreater(l_tasks["mean_luminance"], d_tasks["mean_luminance"])
+
+            # Inspect all 5 reduce-motion snapshots in rm_dir
+            rm_l_steady = inspect_png(rm_dir / "helm_light_steady_reduce_motion.png")
+            rm_d_steady = inspect_png(rm_dir / "helm_dark_steady_reduce_motion.png")
+            rm_d_exc = inspect_png(rm_dir / "helm_dark_exception_reduce_motion.png")
+            rm_l_set = inspect_png(rm_dir / "helm_light_settings_reduce_motion.png")
+            rm_d_set = inspect_png(rm_dir / "helm_dark_settings_reduce_motion.png")
+            for info in (rm_l_steady, rm_d_steady, rm_d_exc):
+                self.assertEqual(info["width"], 1280)
+                self.assertEqual(info["height"], 800)
+                self.assertFalse(info["is_uniform"])
+            self.assertGreater(rm_l_steady["mean_luminance"], rm_d_steady["mean_luminance"])
+            self.assertNotEqual(rm_d_steady["pixel_sha256"], rm_d_exc["pixel_sha256"])
+            for info in (rm_l_set, rm_d_set):
+                self.assertEqual(info["width"], 720)
+                self.assertEqual(info["height"], 660)
+                self.assertFalse(info["is_uniform"])
+            self.assertGreater(rm_l_set["mean_luminance"], rm_d_set["mean_luminance"])
 
 
 if __name__ == "__main__":

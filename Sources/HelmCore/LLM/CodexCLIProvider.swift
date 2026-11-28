@@ -77,6 +77,7 @@ public struct CodexCLIProvider: LLMProvider, Sendable {
             output = try await ProcessRunner.run(
                 executableURL: execURL,
                 arguments: args,
+                currentDirectoryURL: request.validatedWorkingDirectory,
                 environment: processEnv,
                 stdinData: Data(combinedPrompt.utf8),
                 timeoutSeconds: request.timeoutSeconds

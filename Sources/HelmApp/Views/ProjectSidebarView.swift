@@ -38,7 +38,7 @@ public struct ProjectSidebarView: View {
                         .foregroundStyle(HelmInk.primary)
                     Text(store.totalOpenExceptionCount == 0
                         ? "All watches quiet"
-                        : "\(store.totalOpenExceptionCount) need\(store.totalOpenExceptionCount == 1 ? "s" : "") decision")
+                        : "\(store.totalOpenExceptionCount) open alert\(store.totalOpenExceptionCount == 1 ? "" : "s")")
                         .font(.caption)
                         .monospacedDigit()
                         .foregroundStyle(store.totalOpenExceptionCount == 0 ? HelmInk.secondary : HelmSemantic.attention)
@@ -75,9 +75,9 @@ public struct ProjectSidebarView: View {
                         }
                     }
 
-                    // Exception Inbox — completely absent when 0 open exceptions
+                    // Alert Inbox — completely absent when 0 open exceptions
                     if !store.allOpenExceptions.isEmpty {
-                        Text("NEEDS DECISION")
+                        Text("ALERTS")
                             .font(.system(size: 10, weight: .semibold))
                             .tracking(0.8)
                             .foregroundStyle(HelmSemantic.attention)
@@ -549,11 +549,15 @@ public struct ProjectSidebarView: View {
                     Text(project.name)
                         .font(.callout.weight(isSelected ? .semibold : .medium))
                         .foregroundStyle(HelmInk.primary)
-                        .lineLimit(1)
-                    Text(crewCount > 0 ? "\(crewCount) agent\(crewCount == 1 ? "" : "s")" : project.goal)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text(crewCount > 0
+                        ? "\(crewCount) crew · \(project.workspaceRoot.lastPathComponent)"
+                        : project.workspaceRoot.lastPathComponent)
                         .font(.caption)
                         .foregroundStyle(HelmInk.secondary)
                         .lineLimit(1)
+                        .truncationMode(.middle)
                 }
 
                 Spacer(minLength: 0)
@@ -594,7 +598,8 @@ public struct ProjectSidebarView: View {
                     Text(alert.title)
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(HelmInk.primary)
-                        .lineLimit(1)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
                     Text(project.name)
                         .font(.caption2)
                         .foregroundStyle(HelmInk.secondary)

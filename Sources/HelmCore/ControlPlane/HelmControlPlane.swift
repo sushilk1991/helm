@@ -20,10 +20,20 @@ public enum ControlPlaneError: Error, Sendable, LocalizedError, Equatable {
 @MainActor
 @Observable
 public final class HelmControlPlane: Sendable {
+    public typealias ChatDispatchHook = @Sendable (
+        _ project: Project,
+        _ message: ChatMessage,
+        _ controlPlane: HelmControlPlane
+    ) async throws -> [ChatMessage]
+
     public private(set) var projects: [Project] = []
     public private(set) var openExceptionsByProject: [UUID: [ExceptionAlert]] = [:]
     public private(set) var agentsByProject: [UUID: [AgentProfile]] = [:]
     public private(set) var tasksByProject: [UUID: [DelegatedTask]] = [:]
+    public private(set) var chatMessagesByProject: [UUID: [ChatMessage]] = [:]
+    public private(set) var workFeedByProject: [UUID: [AgentWorkEntry]] = [:]
+
+    public var chatDispatchHook: ChatDispatchHook?
 
     public let database: HelmDatabase
     public let sharedStateStore: SharedStateStore
@@ -70,7 +80,12 @@ public final class HelmControlPlane: Sendable {
 
     // MARK: - Locked Control Plane Surface
 
-    public func createProject(name: String, goal: String, workspaceRoot: URL) async throws -> Project {
+    public func createProject(
+        name: String,
+        goal: String,
+        workspaceRoot: URL,
+        sandboxTrustPolicy: SandboxTrustPolicy = .standardWorkspace
+    ) async throws -> Project {
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedName.isEmpty else {
             throw ControlPlaneError.invalidInput("Project name cannot be empty.")
@@ -85,7 +100,8 @@ public final class HelmControlPlane: Sendable {
         let project = Project(
             name: trimmedName,
             goal: trimmedGoal,
-            workspaceRoot: workspaceRoot
+            workspaceRoot: workspaceRoot,
+            sandboxTrustPolicy: sandboxTrustPolicy
         )
         try await database.insertProject(project)
         try await database.appendEvent(RunEvent(
@@ -98,15 +114,38 @@ public final class HelmControlPlane: Sendable {
         return project
     }
 
+    @discardableResult
+    public func updateProjectTrustPolicy(
+        projectID: UUID,
+        policy: SandboxTrustPolicy
+    ) async throws -> Project {
+        guard try await database.fetchProject(id: projectID) != nil else {
+            throw ControlPlaneError.projectNotFound(projectID)
+        }
+        try await database.updateProjectTrustPolicy(id: projectID, policy: policy)
+        try await database.appendEvent(RunEvent(
+            projectID: projectID,
+            kind: .sharedStateWritten,
+            summary: "Updated project trust policy to \(policy.displayName)",
+            trustLevel: .humanAuthoritative
+        ))
+        try await refreshSnapshots(projectID: projectID)
+        guard let updated = try await database.fetchProject(id: projectID) else {
+            throw ControlPlaneError.projectNotFound(projectID)
+        }
+        return updated
+    }
+
     public func addAgent(
         projectID: UUID,
         name: String,
         role: AgentRole,
         goal: String,
         backend: LLMBackendKind,
-        capabilities: Set<AgentCapability> = [.readSharedState, .proposeSharedState, .requestHumanDecision],
+        capabilities: Set<AgentCapability>? = nil,
         personality: AgentPersonality? = nil,
-        personalityNotes: String = ""
+        personalityNotes: String = "",
+        systemPrompt: String? = nil
     ) async throws -> AgentProfile {
         guard try await database.fetchProject(id: projectID) != nil else {
             throw ControlPlaneError.projectNotFound(projectID)
@@ -125,6 +164,7 @@ public final class HelmControlPlane: Sendable {
             throw ControlPlaneError.duplicateAgentName(trimmedName)
         }
 
+        let resolvedCapabilities = capabilities ?? AgentProfile.RolePreset.preset(for: role).capabilities
         let agent = AgentProfile(
             projectID: projectID,
             name: trimmedName,
@@ -132,7 +172,8 @@ public final class HelmControlPlane: Sendable {
             goal: trimmedGoal,
             personality: personality ?? AgentPersonality.defaultForRole(role),
             personalityNotes: personalityNotes.trimmingCharacters(in: .whitespacesAndNewlines),
-            capabilities: capabilities,
+            systemPrompt: systemPrompt,
+            capabilities: resolvedCapabilities,
             backend: backend
         )
         try await database.insertAgent(agent)
@@ -155,7 +196,8 @@ public final class HelmControlPlane: Sendable {
         personality: AgentPersonality? = nil,
         personalityNotes: String? = nil,
         capabilities: Set<AgentCapability>? = nil,
-        modelOverride: String?? = nil
+        modelOverride: String?? = nil,
+        systemPrompt: String? = nil
     ) async throws -> AgentProfile {
         guard var agent = try await database.fetchAgent(id: agentID) else {
             throw HelmDatabaseError.notFound("Agent \(agentID.uuidString)")
@@ -186,6 +228,13 @@ public final class HelmControlPlane: Sendable {
         }
         if let capabilities { agent.capabilities = capabilities }
         if let modelOverride { agent.modelOverride = modelOverride }
+        if let systemPrompt {
+            let trimmedPrompt = systemPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmedPrompt.isEmpty else {
+                throw ControlPlaneError.invalidInput("Agent system prompt cannot be empty.")
+            }
+            agent.systemPrompt = trimmedPrompt
+        }
         agent.updatedAt = Date()
 
         try await database.updateAgent(agent)
@@ -416,6 +465,9 @@ public final class HelmControlPlane: Sendable {
     }
 
     public func listTasks(projectID: UUID) async throws -> [DelegatedTask] {
+        guard try await database.fetchProject(id: projectID) != nil else {
+            throw ControlPlaneError.projectNotFound(projectID)
+        }
         let list = try await database.listTasks(projectID: projectID)
         self.tasksByProject[projectID] = list
         return list
@@ -440,8 +492,337 @@ public final class HelmControlPlane: Sendable {
         return list
     }
 
-    public func listEvents(projectID: UUID, limit: Int = 200) async throws -> [RunEvent] {
+    public func listEvents(projectID: UUID, limit: Int = 1_000) async throws -> [RunEvent] {
         try await database.listEvents(projectID: projectID, limit: limit)
+    }
+
+    // MARK: - Chat & Live Work Feed
+
+    public static func makeOrchestratedChatDispatchHook() -> ChatDispatchHook {
+        { project, incoming, controlPlane in
+            let orchestrator = OrchestratorActor(
+                projectID: project.id,
+                database: controlPlane.database,
+                sharedStateStore: controlPlane.sharedStateStore,
+                providerRegistry: controlPlane.providerRegistry,
+                sandboxExecutor: controlPlane.sandboxExecutor,
+                browserService: controlPlane.browserService,
+                environment: controlPlane.environment
+            )
+            return try await orchestrator.handleChatMessage(incoming)
+        }
+    }
+
+    public func enableAutonomousChatDispatch() {
+        self.chatDispatchHook = Self.makeOrchestratedChatDispatchHook()
+    }
+
+    @discardableResult
+    public func sendChatMessageAndWait(
+        projectID: UUID,
+        channel: ChatChannelKind,
+        content: String,
+        senderKind: ChatSenderKind = .user,
+        senderAgentID: UUID? = nil,
+        senderName: String? = nil,
+        referencedFiles: [String] = [],
+        relatedTaskID: UUID? = nil,
+        messageID: UUID = UUID()
+    ) async throws -> ChatMessage {
+        let overrideHook: ChatDispatchHook? = (chatDispatchHook == nil && senderKind == .user)
+            ? Self.makeOrchestratedChatDispatchHook()
+            : nil
+        let message = try await sendChatMessageImpl(
+            projectID: projectID,
+            channel: channel,
+            content: content,
+            senderKind: senderKind,
+            senderAgentID: senderAgentID,
+            senderName: senderName,
+            referencedFiles: referencedFiles,
+            relatedTaskID: relatedTaskID,
+            dispatchHookOverride: overrideHook,
+            messageID: messageID
+        )
+        try await refreshSnapshots(projectID: projectID)
+        return message
+    }
+
+    public func listChatMessages(
+        projectID: UUID,
+        channel: ChatChannelKind? = nil,
+        limit: Int = 200
+    ) async throws -> [ChatMessage] {
+        guard try await database.fetchProject(id: projectID) != nil else {
+            throw ControlPlaneError.projectNotFound(projectID)
+        }
+        let messages = try await database.listChatMessages(
+            projectID: projectID,
+            channel: channel,
+            limit: limit
+        )
+        if channel == nil {
+            self.chatMessagesByProject[projectID] = messages
+        }
+        return messages
+    }
+
+    @discardableResult
+    public func appendChatMessage(_ message: ChatMessage) async throws -> ChatMessage {
+        guard try await database.fetchProject(id: message.projectID) != nil else {
+            throw ControlPlaneError.projectNotFound(message.projectID)
+        }
+        let agents = try await database.listAgents(projectID: message.projectID)
+        try await validateChatMessageFields(
+            projectID: message.projectID,
+            channel: message.channelKind,
+            content: message.content,
+            senderAgentID: message.senderAgentID,
+            relatedTaskID: message.relatedTaskID,
+            agents: agents
+        )
+        try await database.insertChatMessage(message)
+        self.chatMessagesByProject[message.projectID] = try await database.listChatMessages(
+            projectID: message.projectID,
+            channel: nil,
+            limit: 200
+        )
+        return message
+    }
+
+    @discardableResult
+    public func sendChatMessage(
+        projectID: UUID,
+        channel: ChatChannelKind,
+        content: String,
+        senderKind: ChatSenderKind = .user,
+        senderAgentID: UUID? = nil,
+        senderName: String? = nil,
+        referencedFiles: [String] = [],
+        relatedTaskID: UUID? = nil,
+        messageID: UUID = UUID()
+    ) async throws -> ChatMessage {
+        try await sendChatMessageImpl(
+            projectID: projectID,
+            channel: channel,
+            content: content,
+            senderKind: senderKind,
+            senderAgentID: senderAgentID,
+            senderName: senderName,
+            referencedFiles: referencedFiles,
+            relatedTaskID: relatedTaskID,
+            dispatchHookOverride: nil,
+            messageID: messageID
+        )
+    }
+
+    private func sendChatMessageImpl(
+        projectID: UUID,
+        channel: ChatChannelKind,
+        content: String,
+        senderKind: ChatSenderKind,
+        senderAgentID: UUID?,
+        senderName: String?,
+        referencedFiles: [String],
+        relatedTaskID: UUID?,
+        dispatchHookOverride: ChatDispatchHook?,
+        messageID: UUID = UUID()
+    ) async throws -> ChatMessage {
+        guard let project = try await database.fetchProject(id: projectID) else {
+            throw ControlPlaneError.projectNotFound(projectID)
+        }
+        let trimmedContent = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        let agents = try await database.listAgents(projectID: projectID)
+        try await validateChatMessageFields(
+            projectID: projectID,
+            channel: channel,
+            content: trimmedContent,
+            senderAgentID: senderAgentID,
+            relatedTaskID: relatedTaskID,
+            agents: agents
+        )
+
+        let resolvedSenderName: String
+        if let senderName {
+            let trimmedSender = senderName.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmedSender.isEmpty {
+                resolvedSenderName = trimmedSender
+            } else {
+                resolvedSenderName = Self.defaultSenderName(
+                    senderKind: senderKind,
+                    senderAgentID: senderAgentID,
+                    agents: agents
+                )
+            }
+        } else {
+            resolvedSenderName = Self.defaultSenderName(
+                senderKind: senderKind,
+                senderAgentID: senderAgentID,
+                agents: agents
+            )
+        }
+
+        let message = ChatMessage(
+            id: messageID,
+            projectID: projectID,
+            channelKind: channel,
+            senderKind: senderKind,
+            senderAgentID: senderAgentID,
+            senderName: resolvedSenderName,
+            content: trimmedContent,
+            referencedFiles: referencedFiles,
+            relatedTaskID: relatedTaskID
+        )
+        try await database.insertChatMessage(message)
+        self.chatMessagesByProject[projectID] = try await database.listChatMessages(
+            projectID: projectID,
+            channel: nil,
+            limit: 200
+        )
+
+        let effectiveHook = dispatchHookOverride ?? chatDispatchHook
+        if senderKind == .user, let hook = effectiveHook {
+            let replies = try await hook(project, message, self)
+            if !replies.isEmpty {
+                let currentAgents = try await database.listAgents(projectID: projectID)
+                var unpersistedReplies: [ChatMessage] = []
+                var seenReplyIDs: Set<UUID> = []
+                for reply in replies {
+                    guard reply.projectID == projectID else {
+                        throw ControlPlaneError.invalidInput(
+                            "Chat reply project '\(reply.projectID.uuidString)' does not match project '\(projectID.uuidString)'."
+                        )
+                    }
+                    if let existing = try await database.fetchChatMessage(id: reply.id) {
+                        guard existing.projectID == projectID else {
+                            throw ControlPlaneError.invalidInput(
+                                "Existing chat reply '\(reply.id.uuidString)' does not belong to project '\(projectID.uuidString)'."
+                            )
+                        }
+                        continue
+                    }
+                    try await validateChatMessageFields(
+                        projectID: projectID,
+                        channel: reply.channelKind,
+                        content: reply.content,
+                        senderAgentID: reply.senderAgentID,
+                        relatedTaskID: reply.relatedTaskID,
+                        agents: currentAgents
+                    )
+                    if seenReplyIDs.insert(reply.id).inserted {
+                        unpersistedReplies.append(reply)
+                    }
+                }
+                for reply in unpersistedReplies {
+                    try await database.insertChatMessage(reply)
+                }
+                self.chatMessagesByProject[projectID] = try await database.listChatMessages(
+                    projectID: projectID,
+                    channel: nil,
+                    limit: 200
+                )
+            }
+        }
+
+        return message
+    }
+
+    private func validateChatMessageFields(
+        projectID: UUID,
+        channel: ChatChannelKind,
+        content: String,
+        senderAgentID: UUID?,
+        relatedTaskID: UUID?,
+        agents: [AgentProfile]
+    ) async throws {
+        let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw ControlPlaneError.invalidInput("Chat message content cannot be empty.")
+        }
+        if case .direct(let targetAgentID) = channel {
+            guard agents.contains(where: { $0.id == targetAgentID }) else {
+                throw ControlPlaneError.invalidInput("Target agent '\(targetAgentID.uuidString)' does not belong to project.")
+            }
+        }
+        if let senderAgentID {
+            guard agents.contains(where: { $0.id == senderAgentID }) else {
+                throw ControlPlaneError.invalidInput("Sender agent '\(senderAgentID.uuidString)' does not belong to project.")
+            }
+        }
+        if let relatedTaskID {
+            guard let task = try await database.fetchTask(id: relatedTaskID),
+                  task.projectID == projectID else {
+                throw ControlPlaneError.invalidInput("Related task '\(relatedTaskID.uuidString)' does not belong to project.")
+            }
+        }
+    }
+
+    public func listAgentWorkFeed(
+        projectID: UUID,
+        agentID: UUID? = nil,
+        limit: Int = 200
+    ) async throws -> [AgentWorkEntry] {
+        guard try await database.fetchProject(id: projectID) != nil else {
+            throw ControlPlaneError.projectNotFound(projectID)
+        }
+        let entries = try await database.listAgentWorkEntries(
+            projectID: projectID,
+            agentID: agentID,
+            limit: limit
+        )
+        if agentID == nil {
+            self.workFeedByProject[projectID] = entries
+        }
+        return entries
+    }
+
+    @discardableResult
+    public func recordAgentWorkEntry(_ entry: AgentWorkEntry) async throws -> AgentWorkEntry {
+        guard try await database.fetchProject(id: entry.projectID) != nil else {
+            throw ControlPlaneError.projectNotFound(entry.projectID)
+        }
+        let trimmedSummary = entry.summary.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedSummary.isEmpty else {
+            throw ControlPlaneError.invalidInput("Agent work entry summary cannot be empty.")
+        }
+        guard entry.stepNumber >= 0 else {
+            throw ControlPlaneError.invalidInput("Agent work entry step number cannot be negative.")
+        }
+        let agents = try await database.listAgents(projectID: entry.projectID)
+        guard agents.contains(where: { $0.id == entry.agentID }) else {
+            throw ControlPlaneError.invalidInput("Agent '\(entry.agentID.uuidString)' does not belong to project.")
+        }
+        if let taskID = entry.taskID {
+            guard let task = try await database.fetchTask(id: taskID),
+                  task.projectID == entry.projectID else {
+                throw ControlPlaneError.invalidInput("Task '\(taskID.uuidString)' does not belong to project.")
+            }
+        }
+        try await database.insertAgentWorkEntry(entry)
+        self.workFeedByProject[entry.projectID] = try await database.listAgentWorkEntries(
+            projectID: entry.projectID,
+            agentID: nil,
+            limit: 200
+        )
+        return entry
+    }
+
+    private static func defaultSenderName(
+        senderKind: ChatSenderKind,
+        senderAgentID: UUID?,
+        agents: [AgentProfile]
+    ) -> String {
+        switch senderKind {
+        case .user:
+            return "You"
+        case .agent, .orchestrator:
+            if let senderAgentID, let match = agents.first(where: { $0.id == senderAgentID }) {
+                return match.name
+            }
+            return senderKind == .orchestrator ? "Helm Orchestrator" : "Agent"
+        case .system:
+            return "Helm"
+        }
     }
 
     public func reloadFromStore() async throws {
@@ -452,6 +833,8 @@ public final class HelmControlPlane: Sendable {
             self.agentsByProject[project.id] = try await database.listAgents(projectID: project.id)
             self.tasksByProject[project.id] = try await database.listTasks(projectID: project.id)
             self.openExceptionsByProject[project.id] = try await database.listExceptions(projectID: project.id, openOnly: true)
+            self.chatMessagesByProject[project.id] = try await database.listChatMessages(projectID: project.id, channel: nil, limit: 200)
+            self.workFeedByProject[project.id] = try await database.listAgentWorkEntries(projectID: project.id, agentID: nil, limit: 200)
         }
     }
 
@@ -481,6 +864,8 @@ public final class HelmControlPlane: Sendable {
         self.agentsByProject[projectID] = try await database.listAgents(projectID: projectID)
         self.tasksByProject[projectID] = try await database.listTasks(projectID: projectID)
         self.openExceptionsByProject[projectID] = try await database.listExceptions(projectID: projectID, openOnly: true)
+        self.chatMessagesByProject[projectID] = try await database.listChatMessages(projectID: projectID, channel: nil, limit: 200)
+        self.workFeedByProject[projectID] = try await database.listAgentWorkEntries(projectID: projectID, agentID: nil, limit: 200)
     }
 
     private static func validateAndPrepareWorkspace(_ workspaceRoot: URL) throws {

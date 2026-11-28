@@ -1,8 +1,8 @@
 # Helm
 
-**Helm** is a native macOS, local-first control plane for running autonomous multi-agent workspaces in the background without touching your host cursor or active window focus.
+**Helm** is a native macOS, local-first multi-agent workspace where you attach specialized AI agents to any local project folder, chat with them directly or as a shared crew, inspect their live work feed and tasks, and let them execute autonomously in the background without touching your host cursor or active window focus.
 
-Create a **Project**, deploy specialized agents governed by an **exception-only Orchestrator**, and let work run continuously inside isolated sandboxes and headless browsers—staying silent when healthy and alerting you only when execution stalls, drifts, hits a budget cap, or requires a human decision.
+Create a **Project** tied to a folder, chat 1-on-1 with any agent or coordinate the whole crew in Shared Crew Chat, customize each agent's full system prompt and CLI engine (`Claude`, `Codex`, `Agy`, `Pi`, Direct HTTP, or Apple On-Device), and watch agents work continuously in a multi-turn loop with live tool/file output visibility.
 
 ---
 
@@ -24,9 +24,9 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full v1 architecture 
 
 ## Download (macOS Apple Silicon)
 
-Download the **Developer ID signed & Apple-notarized** **`Helm-0.1.3-arm64.dmg`** installer from [GitHub Releases](https://github.com/sushilk1991/helm/releases/latest):
+Download the **Developer ID signed & Apple-notarized** **`Helm-0.2.0-arm64.dmg`** installer from [GitHub Releases](https://github.com/sushilk1991/helm/releases/latest):
 
-1. Open `Helm-0.1.3-arm64.dmg` and drag **Helm.app** into **Applications**.
+1. Open `Helm-0.2.0-arm64.dmg` and drag **Helm.app** into **Applications**.
 2. Launch **Helm** from Applications (macOS 15.0+ on Apple Silicon `arm64`). Built-in auto-update checks GitHub Releases automatically and lets you update safely (either waiting until active agents finish or checkpointing & auto-resuming across restart).
 
 To build (and optionally sign & notarize) the DMG locally from source:
@@ -36,7 +36,7 @@ bash scripts/build_dmg.sh
 # HELM_SIGN_IDENTITY="Developer ID Application: ..." \
 #   HELM_NOTARY_KEY=/path/to/AuthKey.p8 HELM_NOTARY_KEY_ID=... HELM_NOTARY_ISSUER=... \
 #   bash scripts/build_dmg.sh
-# Output: dist/Helm-0.1.3-arm64.dmg (+ .sha256)
+# Output: dist/Helm-0.2.0-arm64.dmg (+ .sha256)
 ```
 
 ---

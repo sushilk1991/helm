@@ -139,9 +139,9 @@ public final class AppUpdateManager {
         urlSession: URLSession = .shared
     ) {
         let bundleVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String
-        let resolvedVersion = currentVersionString ?? bundleVersion ?? "0.1.3"
+        let resolvedVersion = currentVersionString ?? bundleVersion ?? "0.2.0"
         self.currentVersionString = resolvedVersion
-        self.currentVersion = HelmSemVer(parsing: resolvedVersion) ?? HelmSemVer(major: 0, minor: 1, patch: 3)
+        self.currentVersion = HelmSemVer(parsing: resolvedVersion) ?? HelmSemVer(major: 0, minor: 2, patch: 0)
 
         if let feedURL {
             self.feedURL = feedURL

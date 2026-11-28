@@ -338,8 +338,7 @@ struct HelmCLITests {
             let postRep = try HelmJSON.makeDecoder().decode(ProjectRunReport.self, from: Data(postOut.stdout.utf8))
             if action == "abort" {
                 #expect(postRep.status == .failed)
-                #expect(postRep.tasks.contains(where: { $0.status == .cancelled }))
-                #expect(postRep.tasks.contains(where: { $0.status == .blocked }))
+                #expect(postRep.tasks.allSatisfy { $0.status == .cancelled })
             } else {
                 #expect(postRep.status == .completed)
                 #expect(postRep.alertsSurfaced == 0)

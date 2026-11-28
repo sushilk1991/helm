@@ -8,17 +8,20 @@ import os
 import re
 import shutil
 import signal
+import socket
 import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 import zlib
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 E2E_DIR = Path(__file__).resolve().parent
 REPO_ROOT = E2E_DIR.parent
@@ -28,8 +31,19 @@ TMP_ROOT = E2E_DIR / ".tmp"
 FOCUS_PROBE_BIN = BIN_DIR / "focus_probe"
 
 UUID_OR_NONEMPTY_STR = (str,)
-STATEFUL_SUBCOMMANDS = frozenset({"project", "agent", "run", "exceptions", "state"})
+STATEFUL_SUBCOMMANDS = frozenset(
+    {"project", "agent", "run", "exceptions", "state", "chat", "work-feed", "tasks"}
+)
 VALID_ISOLATION_MODES = frozenset({"virtualizationVM", "seatbeltSandbox"})
+VALID_TRUST_POLICIES = frozenset({"sandboxed", "standardWorkspace", "trustedFullAccess"})
+VALID_CHAT_SENDER_KINDS = frozenset({"user", "agent", "orchestrator", "system"})
+VALID_WORK_PHASES = frozenset(
+    {"planning", "reasoning", "toolCall", "fileEdit", "completed", "failed"}
+)
+PENDING_FEATURE_SUBCOMMANDS = frozenset({"chat", "work-feed", "tasks"})
+PENDING_FEATURE_FLAGS = frozenset(
+    {"--trust-policy", "--system-prompt", "--personality", "--apply-template"}
+)
 
 TIER_MODULES: Dict[str, str] = {
     "0": "test_tier0_harness",
@@ -530,6 +544,210 @@ def run_helmctl(
     )
 
 
+def _is_pending_feature_error(arg_list: Sequence[str], combined_output: str) -> bool:
+    lower = combined_output.lower()
+
+    top_cmd = arg_list[0] if arg_list else ""
+    sub_cmd = arg_list[1] if len(arg_list) > 1 else ""
+
+    if top_cmd in PENDING_FEATURE_SUBCOMMANDS and (
+        f"unknown command '{top_cmd}'" in lower
+        or f"unknown subcommand '{top_cmd}'" in lower
+    ):
+        return True
+
+    if (top_cmd == "agent" and sub_cmd == "update") and (
+        "unknown agent subcommand 'update'" in lower
+        or "unknown subcommand 'update'" in lower
+    ):
+        return True
+
+    if (top_cmd == "project" and sub_cmd in {"update-trust", "update"}) and (
+        f"unknown project subcommand '{sub_cmd}'" in lower
+        or f"unknown subcommand '{sub_cmd}'" in lower
+    ):
+        return True
+
+    if any(flag in arg_list for flag in PENDING_FEATURE_FLAGS) and (
+        "unknown flag" in lower
+        or "unknown option" in lower
+        or "unrecognized flag" in lower
+        or "unrecognized option" in lower
+        or "unsupported option" in lower
+    ):
+        return True
+
+    return False
+
+
+def run_helmctl_feature(
+    args: Sequence[str],
+    *,
+    db_path: Optional[Union[Path, str]] = None,
+    timeout: float = 60.0,
+    expect_json: bool = True,
+    env: Optional[Dict[str, str]] = None,
+    check: bool = True,
+    feature_name: Optional[str] = None,
+) -> CLIResult:
+    """Invoke a helmctl M1-M3 feature surface, mapping pending stubs/unknown subcommands to UnbuiltTargetSkip."""
+    arg_list = [str(a) for a in args]
+    res = run_helmctl(
+        arg_list,
+        db_path=db_path,
+        timeout=timeout,
+        expect_json=False,
+        env=env,
+        check=False,
+    )
+    if res.returncode == 69 and res.stdout.strip():
+        try:
+            stub_json = json.loads(res.stdout)
+        except json.JSONDecodeError:
+            stub_json = None
+        if isinstance(stub_json, dict) and stub_json.get("status") == "not_implemented":
+            label = feature_name or " ".join(arg_list[:2]) or "helmctl feature"
+            milestone = stub_json.get("milestone", "pending")
+            raise UnbuiltTargetSkip(
+                f"{label} CLI surface not implemented yet (rc=69, {milestone})"
+            )
+
+    combined = f"{res.stdout}\n{res.stderr}"
+    if res.returncode != 0 and _is_pending_feature_error(arg_list, combined):
+        label = feature_name or " ".join(arg_list[:2]) or "helmctl feature"
+        raise UnbuiltTargetSkip(f"{label} CLI surface not implemented yet (rc={res.returncode})")
+
+    parsed: Any = None
+    if expect_json and res.stdout.strip():
+        try:
+            parsed = json.loads(res.stdout)
+        except json.JSONDecodeError as exc:
+            if check and res.returncode == 0:
+                raise HelmCLIError(
+                    f"helmctl emitted invalid JSON on stdout: {exc}\nstdout={res.stdout!r}\nstderr={res.stderr!r}",
+                    returncode=res.returncode,
+                    stdout=res.stdout,
+                    stderr=res.stderr,
+                    command=res.command,
+                ) from exc
+
+    if check and res.returncode != 0:
+        raise HelmCLIError(
+            f"helmctl exited with {res.returncode}: {' '.join(res.command)}\nstdout={res.stdout!r}\nstderr={res.stderr!r}",
+            returncode=res.returncode,
+            stdout=res.stdout,
+            stderr=res.stderr,
+            command=res.command,
+        )
+
+    if check and expect_json and parsed is None:
+        raise HelmCLIError(
+            f"helmctl produced empty stdout when JSON was expected: {' '.join(res.command)}\nstderr={res.stderr!r}",
+            returncode=res.returncode,
+            stdout=res.stdout,
+            stderr=res.stderr,
+            command=res.command,
+        )
+
+    return CLIResult(
+        returncode=res.returncode,
+        stdout=res.stdout,
+        stderr=res.stderr,
+        json=parsed,
+        duration_ms=res.duration_ms,
+        command=res.command,
+    )
+
+
+def require_feature_field(obj: Dict[str, Any], field: str, description: str) -> Any:
+    """Require a newly introduced M1-M3 JSON field, skipping cleanly if not built yet."""
+    if not isinstance(obj, dict) or field not in obj:
+        raise UnbuiltTargetSkip(f"{description} ({field} missing in CLI JSON output)")
+    return obj[field]
+
+
+class _LocalIPv6HTTPServer(ThreadingHTTPServer):
+    address_family = socket.AF_INET6
+
+
+class LocalLLMServer:
+    """Deterministic OpenAI-compatible local HTTP server for opaque-box multi-turn E2E tests."""
+
+    def __init__(
+        self,
+        responder: Callable[[Dict[str, Any]], str],
+        *,
+        ipv6: bool = False,
+    ) -> None:
+        self.responder = responder
+        self.ipv6 = ipv6
+        self._server: Optional[ThreadingHTTPServer] = None
+        self._thread: Optional[threading.Thread] = None
+        self.base_url: str = ""
+        self._lock = threading.Lock()
+        self.requests: List[Dict[str, Any]] = []
+
+    def __enter__(self) -> "LocalLLMServer":
+        parent = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:
+                length = int(self.headers.get("Content-Length", "0"))
+                raw_body = self.rfile.read(length) if length > 0 else b"{}"
+                try:
+                    req_json = json.loads(raw_body.decode("utf-8"))
+                except json.JSONDecodeError:
+                    req_json = {}
+
+                with parent._lock:
+                    parent.requests.append(req_json)
+
+                content = parent.responder(req_json)
+                payload = json.dumps(
+                    {
+                        "id": "chatcmpl-helm-e2e",
+                        "object": "chat.completion",
+                        "choices": [
+                            {
+                                "index": 0,
+                                "message": {"role": "assistant", "content": content},
+                                "finish_reason": "stop",
+                            }
+                        ],
+                        "usage": {"prompt_tokens": 12, "completion_tokens": 12},
+                    }
+                ).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.send_header("Connection", "close")
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def log_message(self, fmt: str, *args: Any) -> None:
+                pass
+
+        if self.ipv6:
+            self._server = _LocalIPv6HTTPServer(("::1", 0), Handler)
+            port = self._server.server_address[1]
+            self.base_url = f"http://[::1]:{port}"
+        else:
+            self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+            port = self._server.server_address[1]
+            self.base_url = f"http://127.0.0.1:{port}"
+
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        if self._server is not None:
+            self._server.shutdown()
+            self._server.server_close()
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
+
+
 def _assert_bool(val: Any, name: str) -> None:
     if not isinstance(val, bool):
         raise AssertionError(f"Field '{name}' must be bool, got {type(val).__name__}: {val!r}")
@@ -658,6 +876,76 @@ def validate_exception_alert(data: Any) -> Dict[str, Any]:
     _assert_nonempty_str(data.get("kind"), "kind")
     _assert_nonempty_str(data.get("status"), "status")
     _assert_nonempty_str(data.get("summary"), "summary")
+    return data
+
+
+def validate_chat_message(data: Any) -> Dict[str, Any]:
+    if not isinstance(data, dict):
+        raise AssertionError(f"ChatMessage must be JSON object, got {type(data).__name__}")
+    _assert_nonempty_str(data.get("id"), "id")
+    _assert_nonempty_str(data.get("projectID"), "projectID")
+    channel_key = data.get("channelKey")
+    _assert_nonempty_str(channel_key, "channelKey")
+    if channel_key != "crew" and not str(channel_key).startswith("agent:"):
+        raise AssertionError(
+            f"Field 'channelKey' must be 'crew' or 'agent:<UUID>', got {channel_key!r}"
+        )
+    sender_kind = data.get("senderKind")
+    if sender_kind not in VALID_CHAT_SENDER_KINDS:
+        raise AssertionError(
+            f"Field 'senderKind' must be one of {sorted(VALID_CHAT_SENDER_KINDS)}, got {sender_kind!r}"
+        )
+    _assert_nonempty_str(data.get("senderName"), "senderName")
+    if not isinstance(data.get("content"), str) or not str(data.get("content")).strip():
+        raise AssertionError(f"Field 'content' must be non-empty str, got {data.get('content')!r}")
+    if "referencedFiles" in data and data["referencedFiles"] is not None:
+        if not isinstance(data["referencedFiles"], list):
+            raise AssertionError("Field 'referencedFiles' must be list")
+    created_at = data.get("createdAt")
+    if isinstance(created_at, bool) or created_at is None or (
+        isinstance(created_at, str) and not created_at.strip()
+    ):
+        raise AssertionError(f"Field 'createdAt' must be non-empty timestamp, got {created_at!r}")
+    return data
+
+
+def validate_agent_work_entry(data: Any) -> Dict[str, Any]:
+    if not isinstance(data, dict):
+        raise AssertionError(f"AgentWorkEntry must be JSON object, got {type(data).__name__}")
+    _assert_nonempty_str(data.get("id"), "id")
+    _assert_nonempty_str(data.get("projectID"), "projectID")
+    _assert_nonempty_str(data.get("agentID"), "agentID")
+    _assert_nonempty_str(data.get("agentName"), "agentName")
+    _assert_int(data.get("stepNumber"), "stepNumber")
+    if int(data["stepNumber"]) < 0:
+        raise AssertionError(f"Field 'stepNumber' must be >= 0, got {data['stepNumber']}")
+    phase = data.get("phase")
+    if phase not in VALID_WORK_PHASES:
+        raise AssertionError(
+            f"Field 'phase' must be one of {sorted(VALID_WORK_PHASES)}, got {phase!r}"
+        )
+    _assert_nonempty_str(data.get("summary"), "summary")
+    if not isinstance(data.get("touchedFiles"), list):
+        raise AssertionError("Field 'touchedFiles' must be list")
+    if not isinstance(data.get("artifactPaths"), list):
+        raise AssertionError("Field 'artifactPaths' must be list")
+    return data
+
+
+def validate_project_trust_policy(
+    data: Any, *, expected: Optional[str] = None
+) -> Dict[str, Any]:
+    if not isinstance(data, dict):
+        raise AssertionError(f"Project must be JSON object, got {type(data).__name__}")
+    policy = data.get("sandboxTrustPolicy")
+    if policy not in VALID_TRUST_POLICIES:
+        raise AssertionError(
+            f"Field 'sandboxTrustPolicy' must be one of {sorted(VALID_TRUST_POLICIES)}, got {policy!r}"
+        )
+    if expected is not None and policy != expected:
+        raise AssertionError(
+            f"Expected sandboxTrustPolicy={expected!r}, got {policy!r}"
+        )
     return data
 
 
@@ -1043,6 +1331,34 @@ def run_tier_suite(
     helm_app_path = find_helm_app()
     vm_assets = find_vm_assets()
 
+    all_tests = (
+        res.passed_records
+        + res.failed_records
+        + res.errored_records
+        + res.skipped_unbuilt_records
+        + res.skipped_other_records
+    )
+    tier_counts: Dict[str, Dict[str, int]] = {}
+    for rec in all_tests:
+        mod_prefix = str(rec.get("id", "")).split(".", 1)[0]
+        tier_key = next((k for k, m in TIER_MODULES.items() if m == mod_prefix), mod_prefix)
+        bucket = tier_counts.setdefault(
+            tier_key,
+            {"total": 0, "pass": 0, "fail": 0, "error": 0, "skip_unbuilt": 0, "skip_other": 0},
+        )
+        bucket["total"] += 1
+        st = rec.get("status")
+        if st == "PASS":
+            bucket["pass"] += 1
+        elif st == "FAIL":
+            bucket["fail"] += 1
+        elif st == "ERROR":
+            bucket["error"] += 1
+        elif st == "SKIP_UNBUILT":
+            bucket["skip_unbuilt"] += 1
+        else:
+            bucket["skip_other"] += 1
+
     report_payload = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "tier": tier,
@@ -1058,19 +1374,14 @@ def run_tier_suite(
             "skip_unbuilt": skip_unbuilt_count,
             "skip_other": skip_other_count,
         },
+        "tier_counts": tier_counts,
         "targets": {
             "focus_probe": str(FOCUS_PROBE_BIN) if _is_executable_file(FOCUS_PROBE_BIN) else None,
             "helmctl": str(helmctl_path) if helmctl_path else None,
             "helm_app": str(helm_app_path) if helm_app_path else None,
             "vm_assets": {k: str(v) for k, v in vm_assets.items()} if vm_assets else None,
         },
-        "tests": (
-            res.passed_records
-            + res.failed_records
-            + res.errored_records
-            + res.skipped_unbuilt_records
-            + res.skipped_other_records
-        ),
+        "tests": all_tests,
     }
 
     report_path = Path(json_out) if json_out else (REPORTS_DIR / "latest.json")

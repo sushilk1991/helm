@@ -65,24 +65,47 @@ public actor HelmDatabase {
 
         self.box = SQLiteConnectionBox(opened)
 
-        try Self.execRaw(on: opened, sql: """
-            PRAGMA journal_mode=WAL;
-            PRAGMA synchronous=NORMAL;
-            PRAGMA foreign_keys=ON;
-            PRAGMA busy_timeout=5000;
-            """)
+        sqlite3_busy_timeout(opened, 5000)
 
-        let currentVersion = try Self.queryInt32Scalar(on: opened, sql: "PRAGMA user_version;") ?? 0
+        try Self.retryOnSQLiteBusy {
+            try Self.execRaw(on: opened, sql: "PRAGMA busy_timeout=5000;")
+            if path != ":memory:" {
+                let currentMode = try Self.queryTextScalar(on: opened, sql: "PRAGMA journal_mode;") ?? ""
+                if currentMode.lowercased() != "wal" {
+                    try Self.execRaw(on: opened, sql: "PRAGMA journal_mode=WAL;")
+                }
+            }
+            try Self.execRaw(on: opened, sql: """
+                PRAGMA synchronous=NORMAL;
+                PRAGMA foreign_keys=ON;
+                """)
+        }
+
+        let currentVersion = try Self.retryOnSQLiteBusy {
+            try Self.queryInt32Scalar(on: opened, sql: "PRAGMA user_version;") ?? 0
+        }
         if currentVersion < HelmDatabaseSchema.currentVersion {
-            try Self.execRaw(on: opened, sql: "BEGIN IMMEDIATE;")
+            try Self.retryOnSQLiteBusy {
+                try Self.execRaw(on: opened, sql: "BEGIN IMMEDIATE;")
+            }
             do {
-                if currentVersion < 1 {
-                    try Self.execRaw(on: opened, sql: HelmDatabaseSchema.migrationV1SQL)
+                let lockedVersion = try Self.queryInt32Scalar(on: opened, sql: "PRAGMA user_version;") ?? 0
+                if lockedVersion < HelmDatabaseSchema.currentVersion {
+                    if lockedVersion < 1 {
+                        try Self.execRaw(on: opened, sql: HelmDatabaseSchema.migrationV1SQL)
+                    }
+                    if lockedVersion < 2 {
+                        try Self.execRaw(on: opened, sql: HelmDatabaseSchema.migrationV2SQL)
+                    }
+                    if lockedVersion < 3 {
+                        try Self.execRaw(on: opened, sql: HelmDatabaseSchema.migrationV3SQL)
+                        try Self.backfillAgentSystemPrompts(on: opened)
+                    }
+                    if lockedVersion < 4 {
+                        try Self.execRaw(on: opened, sql: HelmDatabaseSchema.migrationV4SQL)
+                    }
+                    try Self.execRaw(on: opened, sql: "PRAGMA user_version = \(HelmDatabaseSchema.currentVersion);")
                 }
-                if currentVersion < 2 {
-                    try Self.execRaw(on: opened, sql: HelmDatabaseSchema.migrationV2SQL)
-                }
-                try Self.execRaw(on: opened, sql: "PRAGMA user_version = \(HelmDatabaseSchema.currentVersion);")
                 try Self.execRaw(on: opened, sql: "COMMIT;")
             } catch {
                 try? Self.execRaw(on: opened, sql: "ROLLBACK;")
@@ -132,8 +155,10 @@ public actor HelmDatabase {
     public func insertProject(_ project: Project) throws {
         let budgetJSON = try encodeJSONString(project.budgetPolicy)
         let sql = """
-        INSERT INTO projects (id, name, goal, workspace_root, status, budget_policy_json, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+        INSERT INTO projects (
+            id, name, goal, workspace_root, status, budget_policy_json,
+            created_at, updated_at, sandbox_trust_policy
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
         """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
@@ -145,11 +170,12 @@ public actor HelmDatabase {
         try bindText(stmt, index: 6, value: budgetJSON)
         try bindDouble(stmt, index: 7, value: project.createdAt.timeIntervalSince1970)
         try bindDouble(stmt, index: 8, value: project.updatedAt.timeIntervalSince1970)
+        try bindText(stmt, index: 9, value: project.sandboxTrustPolicy.rawValue)
         try stepDone(stmt)
     }
 
     public func fetchProject(id: UUID) throws -> Project? {
-        let stmt = try prepare("SELECT id, name, goal, workspace_root, status, budget_policy_json, created_at, updated_at FROM projects WHERE id = ?;")
+        let stmt = try prepare("SELECT id, name, goal, workspace_root, status, budget_policy_json, created_at, updated_at, sandbox_trust_policy FROM projects WHERE id = ?;")
         defer { sqlite3_finalize(stmt) }
         try bindText(stmt, index: 1, value: id.uuidString)
         let rc = sqlite3_step(stmt)
@@ -161,7 +187,7 @@ public actor HelmDatabase {
     }
 
     public func listProjects() throws -> [Project] {
-        let stmt = try prepare("SELECT id, name, goal, workspace_root, status, budget_policy_json, created_at, updated_at FROM projects ORDER BY created_at ASC;")
+        let stmt = try prepare("SELECT id, name, goal, workspace_root, status, budget_policy_json, created_at, updated_at, sandbox_trust_policy FROM projects ORDER BY created_at ASC;")
         defer { sqlite3_finalize(stmt) }
         var out: [Project] = []
         while true {
@@ -187,6 +213,18 @@ public actor HelmDatabase {
         }
     }
 
+    public func updateProjectTrustPolicy(id: UUID, policy: SandboxTrustPolicy, updatedAt: Date = Date()) throws {
+        let stmt = try prepare("UPDATE projects SET sandbox_trust_policy = ?, updated_at = ? WHERE id = ?;")
+        defer { sqlite3_finalize(stmt) }
+        try bindText(stmt, index: 1, value: policy.rawValue)
+        try bindDouble(stmt, index: 2, value: updatedAt.timeIntervalSince1970)
+        try bindText(stmt, index: 3, value: id.uuidString)
+        try stepDone(stmt)
+        if sqlite3_changes(box.db) == 0 {
+            throw HelmDatabaseError.notFound("Project \(id.uuidString)")
+        }
+    }
+
     // MARK: - Agents
 
     public func insertAgent(_ agent: AgentProfile) throws {
@@ -196,8 +234,8 @@ public actor HelmDatabase {
         INSERT INTO agents (
             id, project_id, name, role, goal, capabilities_json, backend_kind,
             model_override, activity_state, character_seed_json, created_at, updated_at,
-            personality, personality_notes
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+            personality, personality_notes, system_prompt
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
         """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
@@ -215,6 +253,7 @@ public actor HelmDatabase {
         try bindDouble(stmt, index: 12, value: agent.updatedAt.timeIntervalSince1970)
         try bindText(stmt, index: 13, value: agent.personality.rawValue)
         try bindText(stmt, index: 14, value: agent.personalityNotes)
+        try bindText(stmt, index: 15, value: agent.systemPrompt)
         try stepDone(stmt)
     }
 
@@ -222,7 +261,7 @@ public actor HelmDatabase {
         let sql = """
         SELECT id, project_id, name, role, goal, capabilities_json, backend_kind,
                model_override, activity_state, character_seed_json, created_at, updated_at,
-               personality, personality_notes
+               personality, personality_notes, system_prompt
         FROM agents WHERE id = ?;
         """
         let stmt = try prepare(sql)
@@ -240,7 +279,7 @@ public actor HelmDatabase {
         let sql = """
         SELECT id, project_id, name, role, goal, capabilities_json, backend_kind,
                model_override, activity_state, character_seed_json, created_at, updated_at,
-               personality, personality_notes
+               personality, personality_notes, system_prompt
         FROM agents WHERE project_id = ? ORDER BY created_at ASC;
         """
         let stmt = try prepare(sql)
@@ -263,7 +302,7 @@ public actor HelmDatabase {
         let sql = """
         UPDATE agents
         SET name = ?, goal = ?, capabilities_json = ?, backend_kind = ?,
-            model_override = ?, personality = ?, personality_notes = ?, updated_at = ?
+            model_override = ?, personality = ?, personality_notes = ?, system_prompt = ?, updated_at = ?
         WHERE id = ?;
         """
         let stmt = try prepare(sql)
@@ -275,8 +314,9 @@ public actor HelmDatabase {
         try bindOptionalText(stmt, index: 5, value: agent.modelOverride)
         try bindText(stmt, index: 6, value: agent.personality.rawValue)
         try bindText(stmt, index: 7, value: agent.personalityNotes)
-        try bindDouble(stmt, index: 8, value: agent.updatedAt.timeIntervalSince1970)
-        try bindText(stmt, index: 9, value: agent.id.uuidString)
+        try bindText(stmt, index: 8, value: agent.systemPrompt)
+        try bindDouble(stmt, index: 9, value: agent.updatedAt.timeIntervalSince1970)
+        try bindText(stmt, index: 10, value: agent.id.uuidString)
         try stepDone(stmt)
         if sqlite3_changes(box.db) == 0 {
             throw HelmDatabaseError.notFound("Agent \(agent.id.uuidString)")
@@ -302,8 +342,8 @@ public actor HelmDatabase {
             id, project_id, parent_task_id, assigned_agent_id, created_by_agent_id,
             title, instructions, status, waiting_on_json, attempt_count, max_attempts,
             has_external_side_effect, result_summary, error_summary, artifact_paths_json,
-            created_at, updated_at, started_at, completed_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+            created_at, updated_at, started_at, completed_at, task_kind
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
         """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
@@ -326,6 +366,7 @@ public actor HelmDatabase {
         try bindDouble(stmt, index: 17, value: task.updatedAt.timeIntervalSince1970)
         try bindOptionalDouble(stmt, index: 18, value: task.startedAt?.timeIntervalSince1970)
         try bindOptionalDouble(stmt, index: 19, value: task.completedAt?.timeIntervalSince1970)
+        try bindText(stmt, index: 20, value: task.taskKind.rawValue)
         try stepDone(stmt)
     }
 
@@ -334,7 +375,7 @@ public actor HelmDatabase {
         SELECT id, project_id, parent_task_id, assigned_agent_id, created_by_agent_id,
                title, instructions, status, waiting_on_json, attempt_count, max_attempts,
                has_external_side_effect, result_summary, error_summary, artifact_paths_json,
-               created_at, updated_at, started_at, completed_at
+               created_at, updated_at, started_at, completed_at, task_kind
         FROM tasks WHERE id = ?;
         """
         let stmt = try prepare(sql)
@@ -355,7 +396,7 @@ public actor HelmDatabase {
             SELECT id, project_id, parent_task_id, assigned_agent_id, created_by_agent_id,
                    title, instructions, status, waiting_on_json, attempt_count, max_attempts,
                    has_external_side_effect, result_summary, error_summary, artifact_paths_json,
-                   created_at, updated_at, started_at, completed_at
+                   created_at, updated_at, started_at, completed_at, task_kind
             FROM tasks WHERE project_id = ? AND status = ? ORDER BY created_at ASC;
             """
         } else {
@@ -363,7 +404,7 @@ public actor HelmDatabase {
             SELECT id, project_id, parent_task_id, assigned_agent_id, created_by_agent_id,
                    title, instructions, status, waiting_on_json, attempt_count, max_attempts,
                    has_external_side_effect, result_summary, error_summary, artifact_paths_json,
-                   created_at, updated_at, started_at, completed_at
+                   created_at, updated_at, started_at, completed_at, task_kind
             FROM tasks WHERE project_id = ? ORDER BY created_at ASC;
             """
         }
@@ -393,7 +434,7 @@ public actor HelmDatabase {
         SET assigned_agent_id = ?, title = ?, instructions = ?, status = ?,
             waiting_on_json = ?, attempt_count = ?, max_attempts = ?,
             has_external_side_effect = ?, result_summary = ?, error_summary = ?,
-            artifact_paths_json = ?, updated_at = ?, started_at = ?, completed_at = ?
+            artifact_paths_json = ?, updated_at = ?, started_at = ?, completed_at = ?, task_kind = ?
         WHERE id = ?;
         """
         let stmt = try prepare(sql)
@@ -412,7 +453,8 @@ public actor HelmDatabase {
         try bindDouble(stmt, index: 12, value: task.updatedAt.timeIntervalSince1970)
         try bindOptionalDouble(stmt, index: 13, value: task.startedAt?.timeIntervalSince1970)
         try bindOptionalDouble(stmt, index: 14, value: task.completedAt?.timeIntervalSince1970)
-        try bindText(stmt, index: 15, value: task.id.uuidString)
+        try bindText(stmt, index: 15, value: task.taskKind.rawValue)
+        try bindText(stmt, index: 16, value: task.id.uuidString)
         try stepDone(stmt)
     }
 
@@ -687,7 +729,7 @@ public actor HelmDatabase {
         return try decodeEventRow(stmt)
     }
 
-    public func listEvents(projectID: UUID, limit: Int = 500) throws -> [RunEvent] {
+    public func listEvents(projectID: UUID, limit: Int = 1_000) throws -> [RunEvent] {
         let sql = """
         SELECT id, project_id, agent_id, task_id, kind, summary, payload_json, trust_level, created_at
         FROM (
@@ -711,6 +753,197 @@ public actor HelmDatabase {
                 throw HelmDatabaseError.stepFailed(code: rc, message: lastErrorMessage())
             }
             out.append(try decodeEventRow(stmt))
+        }
+        return out
+    }
+
+    // MARK: - Chat Messages
+
+    public func insertChatMessage(_ message: ChatMessage) throws {
+        let filesJSON = try encodeJSONString(message.referencedFiles)
+        let sql = """
+        INSERT INTO chat_messages (
+            id, project_id, channel_key, sender_kind, sender_agent_id,
+            sender_name, content, referenced_files_json, related_task_id, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+        """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        try bindText(stmt, index: 1, value: message.id.uuidString)
+        try bindText(stmt, index: 2, value: message.projectID.uuidString)
+        try bindText(stmt, index: 3, value: message.channelKey)
+        try bindText(stmt, index: 4, value: message.senderKind.rawValue)
+        try bindOptionalText(stmt, index: 5, value: message.senderAgentID?.uuidString)
+        try bindText(stmt, index: 6, value: message.senderName)
+        try bindText(stmt, index: 7, value: message.content)
+        try bindText(stmt, index: 8, value: filesJSON)
+        try bindOptionalText(stmt, index: 9, value: message.relatedTaskID?.uuidString)
+        try bindDouble(stmt, index: 10, value: message.createdAt.timeIntervalSince1970)
+        try stepDone(stmt)
+    }
+
+    public func fetchChatMessage(id: UUID) throws -> ChatMessage? {
+        let sql = """
+        SELECT id, project_id, channel_key, sender_kind, sender_agent_id,
+               sender_name, content, referenced_files_json, related_task_id, created_at
+        FROM chat_messages
+        WHERE id = ?;
+        """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        try bindText(stmt, index: 1, value: id.uuidString)
+        let rc = sqlite3_step(stmt)
+        if rc == SQLITE_DONE { return nil }
+        guard rc == SQLITE_ROW else {
+            throw HelmDatabaseError.stepFailed(code: rc, message: lastErrorMessage())
+        }
+        return try decodeChatMessageRow(stmt)
+    }
+
+    public func listChatMessages(
+        projectID: UUID,
+        channel: ChatChannelKind? = nil,
+        limit: Int = 200
+    ) throws -> [ChatMessage] {
+        let sql: String
+        if channel != nil {
+            sql = """
+            SELECT id, project_id, channel_key, sender_kind, sender_agent_id,
+                   sender_name, content, referenced_files_json, related_task_id, created_at
+            FROM (
+                SELECT rowid AS _ord, id, project_id, channel_key, sender_kind, sender_agent_id,
+                       sender_name, content, referenced_files_json, related_task_id, created_at
+                FROM chat_messages
+                WHERE project_id = ? AND channel_key = ?
+                ORDER BY created_at DESC, rowid DESC
+                LIMIT ?
+            )
+            ORDER BY created_at ASC, _ord ASC;
+            """
+        } else {
+            sql = """
+            SELECT id, project_id, channel_key, sender_kind, sender_agent_id,
+                   sender_name, content, referenced_files_json, related_task_id, created_at
+            FROM (
+                SELECT rowid AS _ord, id, project_id, channel_key, sender_kind, sender_agent_id,
+                       sender_name, content, referenced_files_json, related_task_id, created_at
+                FROM chat_messages
+                WHERE project_id = ?
+                ORDER BY created_at DESC, rowid DESC
+                LIMIT ?
+            )
+            ORDER BY created_at ASC, _ord ASC;
+            """
+        }
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        try bindText(stmt, index: 1, value: projectID.uuidString)
+        if let channel {
+            try bindText(stmt, index: 2, value: channel.channelKey)
+            try bindInt(stmt, index: 3, value: max(0, limit))
+        } else {
+            try bindInt(stmt, index: 2, value: max(0, limit))
+        }
+        var out: [ChatMessage] = []
+        while true {
+            let rc = sqlite3_step(stmt)
+            if rc == SQLITE_DONE { break }
+            guard rc == SQLITE_ROW else {
+                throw HelmDatabaseError.stepFailed(code: rc, message: lastErrorMessage())
+            }
+            out.append(try decodeChatMessageRow(stmt))
+        }
+        return out
+    }
+
+    // MARK: - Agent Work Feed
+
+    public func insertAgentWorkEntry(_ entry: AgentWorkEntry) throws {
+        let touchedJSON = try encodeJSONString(entry.touchedFiles)
+        let artifactsJSON = try encodeJSONString(entry.artifactPaths)
+        let sql = """
+        INSERT INTO agent_work_entries (
+            id, project_id, agent_id, agent_name, task_id, task_title,
+            step_number, phase, summary, tool_name, tool_input_summary,
+            tool_output_summary, touched_files_json, artifact_paths_json, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+        """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        try bindText(stmt, index: 1, value: entry.id.uuidString)
+        try bindText(stmt, index: 2, value: entry.projectID.uuidString)
+        try bindText(stmt, index: 3, value: entry.agentID.uuidString)
+        try bindText(stmt, index: 4, value: entry.agentName)
+        try bindOptionalText(stmt, index: 5, value: entry.taskID?.uuidString)
+        try bindOptionalText(stmt, index: 6, value: entry.taskTitle)
+        try bindInt(stmt, index: 7, value: entry.stepNumber)
+        try bindText(stmt, index: 8, value: entry.phase.rawValue)
+        try bindText(stmt, index: 9, value: entry.summary)
+        try bindOptionalText(stmt, index: 10, value: entry.toolName)
+        try bindOptionalText(stmt, index: 11, value: entry.toolInputSummary)
+        try bindOptionalText(stmt, index: 12, value: entry.toolOutputSummary)
+        try bindText(stmt, index: 13, value: touchedJSON)
+        try bindText(stmt, index: 14, value: artifactsJSON)
+        try bindDouble(stmt, index: 15, value: entry.createdAt.timeIntervalSince1970)
+        try stepDone(stmt)
+    }
+
+    public func listAgentWorkEntries(
+        projectID: UUID,
+        agentID: UUID? = nil,
+        limit: Int = 200
+    ) throws -> [AgentWorkEntry] {
+        let sql: String
+        if agentID != nil {
+            sql = """
+            SELECT id, project_id, agent_id, agent_name, task_id, task_title,
+                   step_number, phase, summary, tool_name, tool_input_summary,
+                   tool_output_summary, touched_files_json, artifact_paths_json, created_at
+            FROM (
+                SELECT rowid AS _ord, id, project_id, agent_id, agent_name, task_id, task_title,
+                       step_number, phase, summary, tool_name, tool_input_summary,
+                       tool_output_summary, touched_files_json, artifact_paths_json, created_at
+                FROM agent_work_entries
+                WHERE project_id = ? AND agent_id = ?
+                ORDER BY created_at DESC, rowid DESC
+                LIMIT ?
+            )
+            ORDER BY created_at ASC, _ord ASC;
+            """
+        } else {
+            sql = """
+            SELECT id, project_id, agent_id, agent_name, task_id, task_title,
+                   step_number, phase, summary, tool_name, tool_input_summary,
+                   tool_output_summary, touched_files_json, artifact_paths_json, created_at
+            FROM (
+                SELECT rowid AS _ord, id, project_id, agent_id, agent_name, task_id, task_title,
+                       step_number, phase, summary, tool_name, tool_input_summary,
+                       tool_output_summary, touched_files_json, artifact_paths_json, created_at
+                FROM agent_work_entries
+                WHERE project_id = ?
+                ORDER BY created_at DESC, rowid DESC
+                LIMIT ?
+            )
+            ORDER BY created_at ASC, _ord ASC;
+            """
+        }
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        try bindText(stmt, index: 1, value: projectID.uuidString)
+        if let agentID {
+            try bindText(stmt, index: 2, value: agentID.uuidString)
+            try bindInt(stmt, index: 3, value: max(0, limit))
+        } else {
+            try bindInt(stmt, index: 2, value: max(0, limit))
+        }
+        var out: [AgentWorkEntry] = []
+        while true {
+            let rc = sqlite3_step(stmt)
+            if rc == SQLITE_DONE { break }
+            guard rc == SQLITE_ROW else {
+                throw HelmDatabaseError.stepFailed(code: rc, message: lastErrorMessage())
+            }
+            out.append(try decodeAgentWorkEntryRow(stmt))
         }
         return out
     }
@@ -1136,6 +1369,138 @@ public actor HelmDatabase {
         }
     }
 
+    private static func backfillAgentSystemPrompts(on db: OpaquePointer) throws {
+        let selectSQL = """
+        SELECT id, role, goal, personality, personality_notes
+        FROM agents
+        WHERE system_prompt = '' OR system_prompt IS NULL;
+        """
+        var selectStmt: OpaquePointer?
+        let prepRC = sqlite3_prepare_v2(db, selectSQL, -1, &selectStmt, nil)
+        guard prepRC == SQLITE_OK, let query = selectStmt else {
+            throw HelmDatabaseError.prepareFailed(
+                code: prepRC,
+                message: String(cString: sqlite3_errmsg(db)),
+                sql: selectSQL
+            )
+        }
+
+        var updates: [(id: String, prompt: String)] = []
+        do {
+            defer { sqlite3_finalize(query) }
+            while true {
+                let rc = sqlite3_step(query)
+                if rc == SQLITE_DONE { break }
+                guard rc == SQLITE_ROW else {
+                    throw HelmDatabaseError.stepFailed(code: rc, message: String(cString: sqlite3_errmsg(db)))
+                }
+                guard let id = sqlite3_column_text(query, 0).map({ String(cString: $0) }) else {
+                    continue
+                }
+                let roleRaw = sqlite3_column_text(query, 1).map { String(cString: $0) } ?? ""
+                let role = AgentRole(rawValue: roleRaw) ?? AgentRole.parse(roleRaw)
+                let goal = sqlite3_column_text(query, 2).map { String(cString: $0) } ?? ""
+                let personalityRaw = sqlite3_column_text(query, 3).map { String(cString: $0) } ?? ""
+                let personality = AgentPersonality(rawValue: personalityRaw)
+                    ?? AgentPersonality.defaultForRole(role)
+                let notes = sqlite3_column_text(query, 4).map { String(cString: $0) } ?? ""
+                let prompt = AgentProfile.buildSystemPromptTemplate(
+                    role: role,
+                    personality: personality,
+                    goal: goal,
+                    notes: notes
+                )
+                updates.append((id: id, prompt: prompt))
+            }
+        }
+
+        guard !updates.isEmpty else { return }
+
+        let updateSQL = "UPDATE agents SET system_prompt = ? WHERE id = ?;"
+        var updateStmt: OpaquePointer?
+        let upRC = sqlite3_prepare_v2(db, updateSQL, -1, &updateStmt, nil)
+        guard upRC == SQLITE_OK, let stmt = updateStmt else {
+            throw HelmDatabaseError.prepareFailed(
+                code: upRC,
+                message: String(cString: sqlite3_errmsg(db)),
+                sql: updateSQL
+            )
+        }
+        defer { sqlite3_finalize(stmt) }
+
+        for row in updates {
+            sqlite3_reset(stmt)
+            sqlite3_clear_bindings(stmt)
+            let b1 = row.prompt.withCString { cStr in
+                sqlite3_bind_text(stmt, 1, cStr, -1, sqliteTransient)
+            }
+            guard b1 == SQLITE_OK else {
+                throw HelmDatabaseError.bindFailed(code: b1, message: String(cString: sqlite3_errmsg(db)))
+            }
+            let b2 = row.id.withCString { cStr in
+                sqlite3_bind_text(stmt, 2, cStr, -1, sqliteTransient)
+            }
+            guard b2 == SQLITE_OK else {
+                throw HelmDatabaseError.bindFailed(code: b2, message: String(cString: sqlite3_errmsg(db)))
+            }
+            let stepRC = sqlite3_step(stmt)
+            guard stepRC == SQLITE_DONE else {
+                throw HelmDatabaseError.stepFailed(code: stepRC, message: String(cString: sqlite3_errmsg(db)))
+            }
+        }
+    }
+
+    private static func isSQLiteBusy(_ error: Error) -> Bool {
+        guard let dbError = error as? HelmDatabaseError else { return false }
+        switch dbError {
+        case .openFailed(let code, _),
+             .prepareFailed(let code, _, _),
+             .stepFailed(let code, _),
+             .bindFailed(let code, _),
+             .execFailed(let code, _):
+            return (code & 0xFF) == SQLITE_BUSY
+        default:
+            return false
+        }
+    }
+
+    private static func retryOnSQLiteBusy<T>(
+        maxAttempts: Int = 10,
+        baseDelaySeconds: TimeInterval = 0.015,
+        _ body: () throws -> T
+    ) throws -> T {
+        var attempt = 0
+        while true {
+            do {
+                return try body()
+            } catch {
+                attempt += 1
+                guard attempt < maxAttempts, isSQLiteBusy(error) else {
+                    throw error
+                }
+                let delay = baseDelaySeconds * Double(attempt) + Double.random(in: 0.002...0.012)
+                Thread.sleep(forTimeInterval: delay)
+            }
+        }
+    }
+
+    private static func queryTextScalar(on db: OpaquePointer, sql: String) throws -> String? {
+        var stmt: OpaquePointer?
+        let rc = sqlite3_prepare_v2(db, sql, -1, &stmt, nil)
+        guard rc == SQLITE_OK, let prepared = stmt else {
+            throw HelmDatabaseError.prepareFailed(code: rc, message: String(cString: sqlite3_errmsg(db)), sql: sql)
+        }
+        defer { sqlite3_finalize(prepared) }
+        let stepRC = sqlite3_step(prepared)
+        if stepRC == SQLITE_ROW {
+            return sqlite3_column_text(prepared, 0).map { String(cString: $0) }
+        }
+        guard stepRC == SQLITE_DONE else {
+            throw HelmDatabaseError.stepFailed(code: stepRC, message: String(cString: sqlite3_errmsg(db)))
+        }
+        return nil
+    }
+
     private static func queryInt32Scalar(on db: OpaquePointer, sql: String) throws -> Int32? {
         var stmt: OpaquePointer?
         let rc = sqlite3_prepare_v2(db, sql, -1, &stmt, nil)
@@ -1146,6 +1511,9 @@ public actor HelmDatabase {
         let stepRC = sqlite3_step(prepared)
         if stepRC == SQLITE_ROW {
             return sqlite3_column_int(prepared, 0)
+        }
+        guard stepRC == SQLITE_DONE else {
+            throw HelmDatabaseError.stepFailed(code: stepRC, message: String(cString: sqlite3_errmsg(db)))
         }
         return nil
     }
@@ -1269,6 +1637,8 @@ public actor HelmDatabase {
         let budget = try decodeJSONString(BudgetPolicy.self, from: budgetJSON)
         let createdAt = Date(timeIntervalSince1970: sqlite3_column_double(stmt, 6))
         let updatedAt = Date(timeIntervalSince1970: sqlite3_column_double(stmt, 7))
+        let trustPolicy = columnText(stmt, index: 8).flatMap(SandboxTrustPolicy.init(rawValue:))
+            ?? .standardWorkspace
         return Project(
             id: id,
             name: name,
@@ -1276,6 +1646,7 @@ public actor HelmDatabase {
             workspaceRoot: wsURL,
             status: status,
             budgetPolicy: budget,
+            sandboxTrustPolicy: trustPolicy,
             createdAt: createdAt,
             updatedAt: updatedAt
         )
@@ -1303,6 +1674,7 @@ public actor HelmDatabase {
         let personality = columnText(stmt, index: 12).flatMap(AgentPersonality.init(rawValue:))
             ?? AgentPersonality.defaultForRole(role)
         let personalityNotes = columnText(stmt, index: 13) ?? ""
+        let rawPrompt = columnText(stmt, index: 14)?.trimmingCharacters(in: .whitespacesAndNewlines)
         return AgentProfile(
             id: id,
             projectID: projectID,
@@ -1311,6 +1683,7 @@ public actor HelmDatabase {
             goal: goal,
             personality: personality,
             personalityNotes: personalityNotes,
+            systemPrompt: (rawPrompt?.isEmpty == false) ? rawPrompt : nil,
             capabilities: Set(capsList),
             backend: backend,
             modelOverride: modelOverride,
@@ -1347,6 +1720,7 @@ public actor HelmDatabase {
         let updatedAt = Date(timeIntervalSince1970: sqlite3_column_double(stmt, 16))
         let startedAt = columnOptionalDouble(stmt, index: 17).map(Date.init(timeIntervalSince1970:))
         let completedAt = columnOptionalDouble(stmt, index: 18).map(Date.init(timeIntervalSince1970:))
+        let taskKind = columnText(stmt, index: 19).flatMap(DelegatedTaskKind.init(rawValue:)) ?? .goal
         return DelegatedTask(
             id: id,
             projectID: projectID,
@@ -1366,7 +1740,8 @@ public actor HelmDatabase {
             createdAt: createdAt,
             updatedAt: updatedAt,
             startedAt: startedAt,
-            completedAt: completedAt
+            completedAt: completedAt,
+            taskKind: taskKind
         )
     }
 
@@ -1482,6 +1857,77 @@ public actor HelmDatabase {
             resolution: resolution,
             createdAt: createdAt,
             resolvedAt: resolvedAt
+        )
+    }
+
+    private func decodeChatMessageRow(_ stmt: OpaquePointer) throws -> ChatMessage {
+        guard
+            let idStr = columnText(stmt, index: 0), let id = UUID(uuidString: idStr),
+            let projStr = columnText(stmt, index: 1), let projectID = UUID(uuidString: projStr),
+            let channelKey = columnText(stmt, index: 2), let channelKind = ChatChannelKind(channelKey: channelKey),
+            let senderStr = columnText(stmt, index: 3), let senderKind = ChatSenderKind(rawValue: senderStr),
+            let senderName = columnText(stmt, index: 5),
+            let content = columnText(stmt, index: 6),
+            let filesJSON = columnText(stmt, index: 7)
+        else {
+            throw HelmDatabaseError.invalidData("Malformed chat_messages row")
+        }
+        let senderAgentID = columnText(stmt, index: 4).flatMap(UUID.init(uuidString:))
+        let referencedFiles = try decodeJSONString([String].self, from: filesJSON)
+        let relatedTaskID = columnText(stmt, index: 8).flatMap(UUID.init(uuidString:))
+        let createdAt = Date(timeIntervalSince1970: sqlite3_column_double(stmt, 9))
+        return ChatMessage(
+            id: id,
+            projectID: projectID,
+            channelKind: channelKind,
+            senderKind: senderKind,
+            senderAgentID: senderAgentID,
+            senderName: senderName,
+            content: content,
+            referencedFiles: referencedFiles,
+            relatedTaskID: relatedTaskID,
+            createdAt: createdAt
+        )
+    }
+
+    private func decodeAgentWorkEntryRow(_ stmt: OpaquePointer) throws -> AgentWorkEntry {
+        guard
+            let idStr = columnText(stmt, index: 0), let id = UUID(uuidString: idStr),
+            let projStr = columnText(stmt, index: 1), let projectID = UUID(uuidString: projStr),
+            let agentStr = columnText(stmt, index: 2), let agentID = UUID(uuidString: agentStr),
+            let agentName = columnText(stmt, index: 3),
+            let phaseStr = columnText(stmt, index: 7), let phase = AgentWorkPhase(rawValue: phaseStr),
+            let summary = columnText(stmt, index: 8),
+            let touchedJSON = columnText(stmt, index: 12),
+            let artifactsJSON = columnText(stmt, index: 13)
+        else {
+            throw HelmDatabaseError.invalidData("Malformed agent_work_entries row")
+        }
+        let taskID = columnText(stmt, index: 4).flatMap(UUID.init(uuidString:))
+        let taskTitle = columnText(stmt, index: 5)
+        let stepNumber = Int(sqlite3_column_int64(stmt, 6))
+        let toolName = columnText(stmt, index: 9)
+        let toolInputSummary = columnText(stmt, index: 10)
+        let toolOutputSummary = columnText(stmt, index: 11)
+        let touchedFiles = try decodeJSONString([String].self, from: touchedJSON)
+        let artifactPaths = try decodeJSONString([String].self, from: artifactsJSON)
+        let createdAt = Date(timeIntervalSince1970: sqlite3_column_double(stmt, 14))
+        return AgentWorkEntry(
+            id: id,
+            projectID: projectID,
+            agentID: agentID,
+            agentName: agentName,
+            taskID: taskID,
+            taskTitle: taskTitle,
+            stepNumber: stepNumber,
+            phase: phase,
+            summary: summary,
+            toolName: toolName,
+            toolInputSummary: toolInputSummary,
+            toolOutputSummary: toolOutputSummary,
+            touchedFiles: touchedFiles,
+            artifactPaths: artifactPaths,
+            createdAt: createdAt
         )
     }
 }

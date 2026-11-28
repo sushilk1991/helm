@@ -51,6 +51,7 @@ public struct LLMRequest: Sendable, Equatable {
     public let model: String?
     public let timeoutSeconds: TimeInterval
     public let maxTokens: Int?
+    public let workingDirectory: URL?
 
     public init(
         requestID: UUID = UUID(),
@@ -63,7 +64,8 @@ public struct LLMRequest: Sendable, Equatable {
         tools: [LLMToolSchema] = [],
         model: String? = nil,
         timeoutSeconds: TimeInterval = 60,
-        maxTokens: Int? = nil
+        maxTokens: Int? = nil,
+        workingDirectory: URL? = nil
     ) {
         self.requestID = requestID
         self.agentID = agentID
@@ -76,6 +78,16 @@ public struct LLMRequest: Sendable, Equatable {
         self.model = model
         self.timeoutSeconds = timeoutSeconds
         self.maxTokens = maxTokens
+        self.workingDirectory = workingDirectory
+    }
+
+    internal var validatedWorkingDirectory: URL? {
+        guard let url = workingDirectory, url.isFileURL else { return nil }
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue else {
+            return nil
+        }
+        return url
     }
 }
 

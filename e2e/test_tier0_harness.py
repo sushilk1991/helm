@@ -24,10 +24,13 @@ from e2e_common import (
     inspect_png,
     require_focus_probe,
     run_tier_module_cli,
+    validate_agent_work_entry,
     validate_browser_observation,
+    validate_chat_message,
     validate_exception_alert,
     validate_execution_result,
     validate_probe_report,
+    validate_project_trust_policy,
 )
 from fixture_server import FixtureServer
 
@@ -336,6 +339,54 @@ class Tier0HarnessSelfTests(E2ETestCase):
             exc_bad = dict(exc_ok, summary="")
             with self.assertRaises(AssertionError):
                 validate_exception_alert(exc_bad)
+
+            # Valid & invalid ChatMessage
+            chat_ok = {
+                "id": "44444444-4444-4444-4444-444444444444",
+                "projectID": "33333333-3333-3333-3333-333333333333",
+                "channelKey": "crew",
+                "senderKind": "user",
+                "senderName": "Operator",
+                "content": "Inspect workspace",
+                "referencedFiles": ["README.md"],
+                "createdAt": "2026-11-27T11:00:00Z",
+            }
+            validate_chat_message(chat_ok)
+            validate_chat_message(dict(chat_ok, channelKey="agent:55555555-5555-5555-5555-555555555555", senderKind="agent"))
+            with self.assertRaises(AssertionError):
+                validate_chat_message(dict(chat_ok, channelKey="invalid_channel"))
+            with self.assertRaises(AssertionError):
+                validate_chat_message(dict(chat_ok, senderKind="bot"))
+            with self.assertRaises(AssertionError):
+                validate_chat_message(dict(chat_ok, content="   "))
+
+            # Valid & invalid AgentWorkEntry
+            work_ok = {
+                "id": "66666666-6666-6666-6666-666666666666",
+                "projectID": "33333333-3333-3333-3333-333333333333",
+                "agentID": "55555555-5555-5555-5555-555555555555",
+                "agentName": "Scout",
+                "stepNumber": 1,
+                "phase": "toolCall",
+                "summary": "Listed workspace files",
+                "toolName": "list_workspace_files",
+                "touchedFiles": ["README.md"],
+                "artifactPaths": [],
+                "createdAt": "2026-11-27T11:00:01Z",
+            }
+            validate_agent_work_entry(work_ok)
+            with self.assertRaises(AssertionError):
+                validate_agent_work_entry(dict(work_ok, stepNumber=-1))
+            with self.assertRaises(AssertionError):
+                validate_agent_work_entry(dict(work_ok, phase="unknownPhase"))
+
+            # Valid & invalid Project sandboxTrustPolicy
+            proj_ok = {"id": "33333333-3333-3333-3333-333333333333", "sandboxTrustPolicy": "standardWorkspace"}
+            validate_project_trust_policy(proj_ok, expected="standardWorkspace")
+            with self.assertRaises(AssertionError):
+                validate_project_trust_policy({"id": "333", "sandboxTrustPolicy": "unrestricted"})
+            with self.assertRaises(AssertionError):
+                validate_project_trust_policy(proj_ok, expected="sandboxed")
 
             # PNG validator self-test (light non-uniform vs dark non-uniform vs uniform)
             light_png = ws1.artifacts_dir / "light.png"

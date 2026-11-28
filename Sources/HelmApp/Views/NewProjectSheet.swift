@@ -13,6 +13,7 @@ public struct NewProjectSheet: View {
     @State private var goal: String = ""
     @State private var backend: LLMBackendKind = .mock
     @State private var leadPersonality: AgentPersonality = .calmCommander
+    @State private var sandboxTrustPolicy: SandboxTrustPolicy = .standardWorkspace
     @State private var starterRoles: Set<AgentRole> = [.researcher, .coder]
     @State private var validationError: String?
     @State private var isSubmitting: Bool = false
@@ -171,6 +172,26 @@ public struct NewProjectSheet: View {
                         }
                     }
                 }
+
+                // 5. Project-Level Workspace Sandbox / Trust Policy
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text("Workspace Access & Sandbox Policy")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(HelmInk.secondary)
+                        Spacer()
+                        Picker("Sandbox Policy", selection: $sandboxTrustPolicy) {
+                            ForEach(SandboxTrustPolicy.allCases, id: \.self) { policy in
+                                Text(policy.displayName).tag(policy)
+                            }
+                        }
+                        .labelsHidden()
+                        .frame(width: 190)
+                    }
+                    Text(sandboxTrustPolicy.summary)
+                        .font(.caption)
+                        .foregroundStyle(HelmInk.muted)
+                }
             }
 
             if let validationError {
@@ -253,7 +274,8 @@ public struct NewProjectSheet: View {
                     workspaceRoot: url,
                     backend: backend,
                     leadPersonality: leadPersonality,
-                    starterRoles: ordered
+                    starterRoles: ordered,
+                    sandboxTrustPolicy: sandboxTrustPolicy
                 )
                 dismiss()
             } catch {

@@ -9,6 +9,34 @@ public enum ProjectStatus: String, Codable, Sendable, CaseIterable {
     case failed
 }
 
+public enum SandboxTrustPolicy: String, Codable, Sendable, CaseIterable, Hashable {
+    case sandboxed
+    case standardWorkspace
+    case trustedFullAccess
+
+    public var displayName: String {
+        switch self {
+        case .sandboxed:
+            return "Sandboxed"
+        case .standardWorkspace:
+            return "Workspace Direct"
+        case .trustedFullAccess:
+            return "Trusted Full Access"
+        }
+    }
+
+    public var summary: String {
+        switch self {
+        case .sandboxed:
+            return "Seatbelt / VM isolation around workspace"
+        case .standardWorkspace:
+            return "Direct read/write & tools inside project folder"
+        case .trustedFullAccess:
+            return "Full local tool & command execution for project"
+        }
+    }
+}
+
 public struct BudgetPolicy: Codable, Sendable, Equatable, Hashable {
     public var maxStepsPerRun: Int
     public var stepTimeoutSeconds: TimeInterval
@@ -41,6 +69,7 @@ public struct Project: Codable, Sendable, Identifiable, Equatable, Hashable {
     public var workspaceRoot: URL
     public var status: ProjectStatus
     public var budgetPolicy: BudgetPolicy
+    public var sandboxTrustPolicy: SandboxTrustPolicy
     public let createdAt: Date
     public var updatedAt: Date
 
@@ -51,6 +80,7 @@ public struct Project: Codable, Sendable, Identifiable, Equatable, Hashable {
         workspaceRoot: URL,
         status: ProjectStatus = .idle,
         budgetPolicy: BudgetPolicy = BudgetPolicy(),
+        sandboxTrustPolicy: SandboxTrustPolicy = .standardWorkspace,
         createdAt: Date = Date(),
         updatedAt: Date = Date()
     ) {
@@ -60,7 +90,26 @@ public struct Project: Codable, Sendable, Identifiable, Equatable, Hashable {
         self.workspaceRoot = workspaceRoot
         self.status = status
         self.budgetPolicy = budgetPolicy
+        self.sandboxTrustPolicy = sandboxTrustPolicy
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, goal, workspaceRoot, status, budgetPolicy, sandboxTrustPolicy, createdAt, updatedAt
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try c.decode(UUID.self, forKey: .id)
+        self.name = try c.decode(String.self, forKey: .name)
+        self.goal = try c.decode(String.self, forKey: .goal)
+        self.workspaceRoot = try c.decode(URL.self, forKey: .workspaceRoot)
+        self.status = try c.decode(ProjectStatus.self, forKey: .status)
+        self.budgetPolicy = try c.decode(BudgetPolicy.self, forKey: .budgetPolicy)
+        self.sandboxTrustPolicy = try c.decodeIfPresent(SandboxTrustPolicy.self, forKey: .sandboxTrustPolicy)
+            ?? .standardWorkspace
+        self.createdAt = try c.decode(Date.self, forKey: .createdAt)
+        self.updatedAt = try c.decode(Date.self, forKey: .updatedAt)
     }
 }
